@@ -1,0 +1,25 @@
+repos:
+  - repo: https://github.com/fsfe/reuse-tool
+    rev: v3.0.1
+    hooks:
+    - id: reuse
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.3.4
+    hooks:
+      - id: ruff
+        args: [ --fix ]
+      - id: ruff-format
+
+  - repo: https://github.com/python-poetry/poetry
+    rev: 1.8.2
+    hooks:
+    - id: poetry-check
+
+  - repo: local
+    hooks:
+    - id: nbconvert-clear-output
+      name: nbconvert-clear-output
+      entry: .git-hooks/pre-commit
+      language: system
+      types: [text]

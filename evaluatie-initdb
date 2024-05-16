@@ -1,0 +1,88 @@
+#!/usr/bin/env python3
+
+# SPDX-FileCopyrightText: 2024 Marten Ringwelski
+# SPDX-FileContributor: Marten Ringwelski <git@maringuu.de>
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
+import click
+import sqlalchemy as sa
+
+
+@click.command(
+    name="evaluatie-initdb",
+)
+@click.option(
+    "--postgres-url",
+    "postgres_url_str",
+    type=str,
+)
+@click.option(
+    "--bsim-postgres-url",
+    "bsim_postgres_url_str",
+    type=str,
+)
+def cli(postgres_url_str: str | None, bsim_postgres_url_str: str | None):
+    """Initialize the evaluatie database schema"""
+    # Import here to avoid failure before the click.command is initialized.
+    from evaluatie import models as m
+
+    if postgres_url_str is None:
+        err = click.ClickException(
+            "Could not determinie postgres connection url."
+            " Please specify --postgres-url or create the Zacken configuration file."
+        )
+        try:
+            from evaluatie import cfg
+        except FileNotFoundError as e:
+            raise err from e
+
+        try:
+            postgres_url_str = cfg.gets("evaluatie", "postgres-url")
+        except KeyError as e:
+            raise err from e
+
+    postgres_url = sa.engine.make_url(postgres_url_str)
+    if bsim_postgres_url_str is None:
+        bsim_postgres_url = sa.engine.URL.create(
+            drivername=postgres_url.drivername,
+            username=postgres_url.username,
+            password=postgres_url.password,
+            host=postgres_url.host,
+            port=postgres_url.port,
+            database="bsim",
+            query=postgres_url.query,
+        )
+    else:
+        bsim_postgres_url = sa.engine.make_url(bsim_postgres_url_str)
+
+    engine = sa.create_engine(postgres_url)
+    sa.event.remove(sa.Engine, "engine_connect", m.on_engine_connect)
+    with engine.connect() as connection:
+        connection.execute(
+            # fmt: off
+            sa.text(
+                # XXX This should not be hardcoded
+                # Create a local schema 'bsim' that is connected to the bsim database via postgres_fdw.
+                "CREATE EXTENSION IF NOT EXISTS lshvector;\n"
+                "CREATE EXTENSION IF NOT EXISTS postgres_fdw;\n"
+                "CREATE SERVER IF NOT EXISTS bsim FOREIGN DATA WRAPPER postgres_fdw OPTIONS"
+                f" (host '{bsim_postgres_url.host}', dbname '{bsim_postgres_url.database}', port '{bsim_postgres_url.port}');\n"
+                f"CREATE USER MAPPING IF NOT EXISTS FOR {postgres_url.username} SERVER bsim OPTIONS"
+                f" (user '{bsim_postgres_url.username}', password '{bsim_postgres_url.password}');\n"
+                "CREATE SCHEMA IF NOT EXISTS bsim;\n"
+                "IMPORT FOREIGN SCHEMA public FROM SERVER bsim INTO bsim;\n"
+                # Create views for all tables needed by lsh_reload
+                # Views are sufficient, as Ghidra selects from these by name in lsh.c
+                "CREATE OR REPLACE VIEW weighttable AS SELECT * FROM bsim.weighttable;\n"
+                "CREATE OR REPLACE VIEW idflookup AS SELECT * FROM bsim.idflookup;\n"
+                "CREATE OR REPLACE VIEW keyvaluetable AS SELECT * FROM bsim.keyvaluetable;\n"
+            )
+            # fmt: on
+        )
+
+        m.Base.metadata.create_all(bind=connection)
+        connection.commit()
+
+
+cli()

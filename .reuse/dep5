@@ -1,0 +1,16 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: evaluatie
+Upstream-Contact: Marten Ringwelski <git@maringuu.de>
+Source: https://codeberg.org/maringuu/studeerwerk
+
+Files: poetry.lock .pre-commit-config.yaml .gitignore .gitattributes
+Copyright: 2024 Marten Ringwelski
+License: CC0-1.0
+
+Files: example/config.ini
+Copyright: 2024 Marten Ringwelski
+License: CC0-1.0
+
+Files: tests/data/*.tar.gz
+Copyright: 2024 Marten Ringwelski
+License: ODC-By-1.0

@@ -1,0 +1,24 @@
+#!/bin/sh
+
+# SPDX-FileCopyrightText: 2024 Marten Ringwelski
+# SPDX-FileContributor: Marten Ringwelski <git@maringuu.de>
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
+formatted=$(mktemp)
+
+for file in $(git diff --cached --name-only --diff-filter=ACMRT | rg '\.ipynb$'); do
+    python3 -m nbconvert --clear-output --stdout $file > $formatted 2>/dev/null
+
+    diff -q $file $formatted 2>/dev/null 1>/dev/null
+    if [ $? -eq 1 ]; then
+        printf "%s neets it output cleared.\n" $file
+        printf "Run\n"
+        printf "\tpython3 -m nbconvert --clear-output %s\n" $file
+        printf "and try again\n"
+        exit 1
+    fi
+done
+
+rm $formatted
+exit 0
