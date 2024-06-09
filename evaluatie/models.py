@@ -134,7 +134,9 @@ class Binary(Base):
     #: The binary's size in bytes
     size: Mapped[int] = mapped_column()
     #: The binary's base addrees (cf. ld(1) and objdump -p)
-    image_base: Mapped[int] = mapped_column()
+    image_base: Mapped[int] = mapped_column(
+        sa.BigInteger,
+    )
 
     package_name: Mapped[str] = mapped_column(
         "package_name",
