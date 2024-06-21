@@ -203,10 +203,14 @@ class Function(Base):
     )
     #: The path to the source file that this funciton is defined in.
     file: Mapped[str] = mapped_column(
+        # Nullable to account for missing data
+        nullable=True,
         index=True,
     )
     #: The line number of the function in the source file.
     lineno: Mapped[int] = mapped_column(
+        # Nullable to account for missing data
+        nullable=True,
         index=True,
     )
 
