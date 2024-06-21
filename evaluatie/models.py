@@ -258,14 +258,16 @@ class Function(Base):
 
 
 class CallGraphEdge(Base):
+    """An edge in the call-graph. Nodes are Functions.
+    Note that the binary of the source and destination can be different,
+    due to library calls. The call-graph of a particular binary is the set of all
+    edges where the source function is the given binary."""
     __tablename__ = "call_graph_edge"
 
     id: Mapped[int] = mapped_column(
         primary_key=True,
         index=True,
     )
-    # XXX Add binary relation?
-    # XXX Add constraint that functions are form the same binary?
     src_id: Mapped[int] = mapped_column(
         sa.ForeignKey("function.id"),
         index=True,
@@ -283,6 +285,16 @@ class CallGraphEdge(Base):
 
     __table_args__ = (
         sa.UniqueConstraint(
+            src_id,
+            dst_id,
+        ),
+        sa.Index(
+            "call_graph_edge_dst_src",
+            dst_id,
+            src_id,
+        ),
+        sa.Index(
+            "call_graph_edge_src_dst",
             src_id,
             dst_id,
         ),

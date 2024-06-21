@@ -45,6 +45,32 @@ WHERE "function".vector IS NULL AND
 
 ```
 
+In a similar fashion the call-graphs can be imported from studeerwerk to evalautie.
+```sql
+WITH f AS (
+	SELECT fun.id, fun.offset + b.image_base AS address, fun.name, fun.binary_id
+	FROM "function" AS fun JOIN "binary" AS b ON fun.binary_id = b.id
+),
+description2function AS (
+	SELECT description.id AS description_id, f.id AS function_id
+	FROM bsim.desctable AS description
+		JOIN f ON (
+			description.addr = f.address
+		)
+		JOIN bsim.exetable AS executable ON description.id_exe = executable.id
+	WHERE f.binary_id = (
+	        SELECT "binary".id
+	        FROM "binary"
+			WHERE "binary".md5 = executable.md5
+	)
+)
+INSERT INTO call_graph_edge(src_id, dst_id)
+SELECT src.function_id AS src_id, dst.function_id AS dst_id
+FROM bsim.callgraphtable AS cg
+	JOIN description2function AS src ON  cg.src = src.description_id
+	JOIN description2function AS dst ON  cg.dest = dst.description_id
+```
+
 ## Notes
 XXX Move these to docs
 ```sql
