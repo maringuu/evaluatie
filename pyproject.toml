@@ -36,6 +36,7 @@ pyinstrument = "^4.6.2"
 
 [tool.ruff]
 line-length = 100
+extend-include = ["*.ipynb"]
 
 [tool.ruff.lint]
 select = [
