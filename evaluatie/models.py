@@ -222,10 +222,9 @@ class Function(Base):
     binary: Mapped[Binary] = relationship(
         back_populates="functions",
     )
-    # XXX We could add a client side sql executed function
-    # that fetches this from the bsim schema.
     vector = mapped_column(
         LshVector,
+        # Nullable to account for functions that Ghidra did not find
         nullable=True,
     )
 
