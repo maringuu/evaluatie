@@ -7,18 +7,21 @@
 
 formatted=$(mktemp)
 
+ret=0
+
 for file in $(git diff --cached --name-only --diff-filter=ACMRT | rg '\.ipynb$'); do
     python3 -m nbconvert --clear-output --stdout $file > $formatted 2>/dev/null
 
     diff -q $file $formatted 2>/dev/null 1>/dev/null
     if [ $? -eq 1 ]; then
+        ret=1
+
         printf "%s neets it output cleared.\n" $file
         printf "Run\n"
         printf "\tpython3 -m nbconvert --clear-output %s\n" $file
         printf "and try again\n"
-        exit 1
     fi
 done
-
 rm $formatted
-exit 0
+
+exit $ret
