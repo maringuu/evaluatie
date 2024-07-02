@@ -23,6 +23,8 @@ AS $$
 DECLARE
     query_binary_id integer;
     query_function_vector lshvector;
+    tf_ids integer[];
+    qf_ids integer[];
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM "function" WHERE id = query_function_id) THEN
         RAISE EXCEPTION 'Query function with id % does not exist', query_function_id;
