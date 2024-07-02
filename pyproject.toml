@@ -10,7 +10,6 @@ description = ""
 authors = ["Marten Ringwelski <git@maringuu.de>"]
 readme = "README.md"
 
-
 [tool.poetry.dependencies]
 python = "^3.10"
 pandas = "^2.2.2"
@@ -34,6 +33,10 @@ rich = {extras = ["jupyter"], version = "^13.7.1"}
 pre-commit = "^3.7.1"
 ghidra-stubs = "^11.0.3.1.0.4"
 pyinstrument = "^4.6.2"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
 
 [tool.ruff]
 line-length = 100
