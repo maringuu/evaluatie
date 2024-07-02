@@ -15,7 +15,7 @@ python = "^3.10"
 pandas = "^2.2.2"
 matplotlib = "^3.8.4"
 seaborn = "^0.13.2"
-studeerwerk = { path = "../code/", develop = true }
+studeerwerk = { path = "../studeerwerk/", develop = true }
 attrs = "^23.2.0"
 msgspec = "^0.18.6"
 sqlalchemy = "^2.0.30"

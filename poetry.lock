@@ -5900,7 +5900,7 @@ sqlalchemy-utils = "^0.41.2"
 
 [package.source]
 type = "directory"
-url = "../code"
+url = "../studeerwerk"
 
 [[package]]
 name = "terminado"
@@ -6158,4 +6158,4 @@ files = [
 [metadata]
 lock-version = "2.0"
 python-versions = "^3.10"
-content-hash = "569fc1190847fda2923d66e5af225dc197f06389588c9f5b382321907761b714"
+content-hash = "df959327b349ea717f8b37cae47728593db9a07089e47649592bf1459d8ddd92"
