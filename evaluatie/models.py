@@ -128,11 +128,17 @@ class Binary(Base):
         index=True,
     )
     #: The binary's name
-    name: Mapped[str] = mapped_column()
+    name: Mapped[str] = mapped_column(
+        index=True,
+    )
     #: The binary's md5 hash
-    md5: Mapped[str] = mapped_column()
+    md5: Mapped[str] = mapped_column(
+        index=True,
+    )
     #: The binary's size in bytes
-    size: Mapped[int] = mapped_column()
+    size: Mapped[int] = mapped_column(
+        index=True,
+    )
     #: The binary's base addrees (cf. ld(1) and objdump -p)
     image_base: Mapped[int] = mapped_column(
         sa.BigInteger,
