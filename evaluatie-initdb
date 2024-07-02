@@ -30,7 +30,7 @@ def cli(postgres_url_str: str | None, bsim_postgres_url_str: str | None):
     if postgres_url_str is None:
         err = click.ClickException(
             "Could not determinie postgres connection url."
-            " Please specify --postgres-url or create the Zacken configuration file."
+            " Please specify --postgres-url or create the evaluatie configuration file."
         )
         try:
             from evaluatie import cfg
