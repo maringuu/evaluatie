@@ -73,12 +73,6 @@ FROM bsim.callgraphtable AS cg
 
 ## Notes
 XXX Move these to docs
-```sql
--- Copying tables
-TRUNCATE idflookup;
-INSERT INTO idflookup
-SELECT * FROM bsim.idflookup;
-```
 
 ```sql
 -- Prewarm as the Ghidra code suggests
