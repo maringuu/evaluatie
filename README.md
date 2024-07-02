@@ -26,43 +26,67 @@ SELECT lsh_reload();
 
 
 -- Update vector entries for all functions that have a corresponding function in Ghidra.
-UPDATE "function" SET vector = bsim_functions.vector
+WITH binary_analyzed AS (
+	SELECT b.id as binary_id, e.id as executable_id
+	FROM "binary" AS b
+	JOIN bsim.exetable AS e
+	ON b.md5 = e.md5
+),
+function_data AS (
+	SELECT f.id AS id, f.offset + b.image_base AS address, b.id AS binary_id, f.name
+	FROM "function" AS f JOIN "binary" AS b ON f.binary_id = b.id
+),
+description2function AS (
+	SELECT description.id AS description_id, function_data.id AS function_id
+	FROM bsim.desctable AS description
+		JOIN binary_analyzed ON (
+			description.id_exe = binary_analyzed.executable_id
+		)
+		JOIN function_data ON (
+	        -- As noted in data-integrity.ipynb the address is sufficient here,
+	        -- despite mismatches in names.
+			description.addr = function_data.address AND
+			binary_analyzed.binary_id = function_data.binary_id
+		)
+)
+UPDATE "function" AS f
+	SET vector = function_id2vector.vector
 FROM (
-    -- Update from all functions that are in Ghidra's tables.
-    SELECT bsim.desctable.name_func AS function_name, bsim.exetable.md5 AS md5, bsim.vectable.vec AS vector
-    FROM bsim.desctable
-    JOIN bsim.vectable ON bsim.desctable.id_signature = bsim.vectable.id
-    JOIN bsim.exetable ON bsim.desctable.id_exe = bsim.exetable.id
-) AS bsim_functions
--- Update only functions in the exact same binary.
-WHERE "function".vector IS NULL AND
-    "function"."name" = bsim_functions.function_name AND
-    "function".binary_id = (
-        SELECT "binary".id
-        FROM "binary"
-        WHERE "binary".md5 = bsim_functions.md5
-    );
+	SELECT description2function.function_id, vectable.vec AS vector
+	FROM bsim.vectable AS vectable JOIN bsim.desctable AS description ON (
+			description.id_signature = vectable.id
+		) JOIN description2function ON (
+			description2function.description_id = description.id
+		)
+) AS function_id2vector
+WHERE function_id2vector.function_id = f.id
 
 ```
 
 In a similar fashion the call-graphs can be imported from studeerwerk to evalautie.
 ```sql
-WITH f AS (
-	SELECT fun.id, fun.offset + b.image_base AS address, fun.name, fun.binary_id
-	FROM "function" AS fun JOIN "binary" AS b ON fun.binary_id = b.id
+WITH binary_analyzed AS (
+    SELECT b.id as binary_id, e.id as executable_id
+	FROM "binary" AS b
+	JOIN bsim.exetable AS e
+	ON b.md5 = e.md5
+),
+function_data AS (
+	SELECT f.id AS id, f.offset + b.image_base AS address, b.id AS binary_id, f.name
+	FROM "function" AS f JOIN "binary" AS b ON f.binary_id = b.id
 ),
 description2function AS (
-	SELECT description.id AS description_id, f.id AS function_id
+	SELECT description.id AS description_id, function_data.id AS function_id
 	FROM bsim.desctable AS description
-		JOIN f ON (
-			description.addr = f.address
+		JOIN binary_analyzed ON (
+			description.id_exe = binary_analyzed.executable_id
 		)
-		JOIN bsim.exetable AS executable ON description.id_exe = executable.id
-	WHERE f.binary_id = (
-	        SELECT "binary".id
-	        FROM "binary"
-			WHERE "binary".md5 = executable.md5
-	)
+		JOIN function_data ON (
+	        -- As noted in data-integrity.ipynb the address is sufficient here,
+	        -- despite mismatches in names.
+			description.addr = function_data.address AND
+			binary_analyzed.binary_id = function_data.binary_id
+		)
 )
 INSERT INTO call_graph_edge(src_id, dst_id)
 SELECT src.function_id AS src_id, dst.function_id AS dst_id
