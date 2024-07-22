@@ -213,6 +213,10 @@ class Function(Base):
         nullable=True,
         index=True,
     )
+    path: Mapped[str] = mapped_column(
+        nullable=True,
+        index=True,
+    )
     #: The line number of the function in the source file.
     lineno: Mapped[int] = mapped_column(
         # Nullable to account for missing data
@@ -224,6 +228,8 @@ class Function(Base):
     offset: Mapped[int] = mapped_column()
     #: The function's size in bytes
     size: Mapped[int] = mapped_column()
+    #: The functions section in the binary
+    section: Mapped[str] = mapped_column()
 
     binary_id: Mapped[int] = mapped_column(
         sa.ForeignKey("binary.id"),
@@ -237,6 +243,15 @@ class Function(Base):
         # Nullable to account for functions that Ghidra did not find
         nullable=True,
     )
+    features_id: Mapped[int] = mapped_column(
+        sa.ForeignKey("features.id"),
+        index=True,
+        unique=True,
+    )
+    features: Mapped["Features"] = relationship(
+        foreign_keys=features_id,
+    )
+
 
     __table_args__ = (
         # Ensure that function names are unique in a gesingle binary.
@@ -265,46 +280,23 @@ class Function(Base):
         ),
     )
 
-
-class CallGraphEdge(Base):
-    """An edge in the call-graph. Nodes are Functions.
-    Note that the binary of the source and destination can be different,
-    due to library calls. The call-graph of a particular binary is the set of all
-    edges where the source function is the given binary."""
-    __tablename__ = "call_graph_edge"
+class Features(Base):
+    """Manually engineered features of functions.
+    Note that the destinction of this table and the 'function' table
+    is not clear. On could say that this table contains less essential
+    features while the function table contains features that are necessary
+    to describe a function."""
+    __tablename__ = "features"
 
     id: Mapped[int] = mapped_column(
         primary_key=True,
         index=True,
     )
-    src_id: Mapped[int] = mapped_column(
-        sa.ForeignKey("function.id"),
-        index=True,
-    )
-    src: Mapped[Function] = relationship(
-        foreign_keys=src_id,
-    )
-    dst_id: Mapped[int] = mapped_column(
-        sa.ForeignKey("function.id"),
-        index=True,
-    )
-    dst: Mapped[Function] = relationship(
-        foreign_keys=dst_id,
-    )
 
-    __table_args__ = (
-        sa.UniqueConstraint(
-            src_id,
-            dst_id,
-        ),
-        sa.Index(
-            "call_graph_edge_dst_src",
-            dst_id,
-            src_id,
-        ),
-        sa.Index(
-            "call_graph_edge_src_dst",
-            src_id,
-            dst_id,
-        ),
+    cfg_node_count: Mapped[int] = mapped_column(
+        index=True,
     )
+    cfg_edge_count: Mapped[int] = mapped_column(
+        index=True,
+    )
+    # XXX This is missing the section name and hash

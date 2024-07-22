@@ -1,102 +1,137 @@
+import pathlib as pl
+
 import msgspec
-import networkx as nx
-import sqlalchemy as sa
-
-from evaluatie import models as m
+import pandas as pd
 
 
-class BinaryPair(msgspec.Struct, frozen=True):
-    lbinary: m.Binary
-    rbinary: m.Binary
+class DatasetOptions(msgspec.Struct):
+    size: str | None = None
+    neighborhood_size: str | None = None
 
-    #: A list of pairs of functions that should match
-    positives: list[tuple[int, int]]
-    #: A list of paris that should not match
-    negatives: list[tuple[int, int]]
+    def indexer(self, frame: pd.DataFrame):
+        ret = pd.Series(
+            data=True,
+            index=frame.index,
+        )
+        if self.size is not None and self.size != "all":
+            ret &= frame["qsize"] == self.size
+        if self.neighborhood_size is not None and self.neighborhood_size != "all":
+            ret &= frame["qneighborhood_size"] == self.neighborhood_size
 
-    # A bipartite graph where 'left' are functions from lbinary,
-    # and 'right' are functions from rbinary.
-    similarity_graph: nx.Graph
+        return ret
+
+
+class FunctionDataset(msgspec.Struct):
+    name: str
+    frame: pd.DataFrame
 
     @classmethod
-    def from_binary_ids(cls, lid: int, rid: int):
-        with m.Session() as session:
-            LFunction = sa.orm.aliased(m.Function)
-            RFunction = sa.orm.aliased(m.Function)
-            positives_stmt = sa.select(
-                LFunction.id,
-                RFunction.id,
-            ).where(
-                LFunction.binary_id == lid,
-                RFunction.binary_id == rid,
-            ).where(
-                LFunction.lineno == RFunction.lineno,
-                LFunction.file == RFunction.file,
-                LFunction.name == RFunction.name,
-            ).where(
-                LFunction.vector != None,
-                RFunction.vector != None,
+    def from_name(cls, name: str):
+        csv_path = pl.Path("datasets", f"{name}.csv")
+        if not csv_path.exists():
+            raise ValueError(f"The dataset {name} was expected at {csv_path} but not found.")
+
+        csv_frame = pd.read_csv(csv_path)
+        csv_frame = _massage_frame(csv_frame)
+        return cls(
+            name=name,
+            frame=csv_frame,
+        )
+
+    def load_pickle(self) -> "FunctionDataset":
+        if "neighbsim" in self.frame:
+            raise ValueError("Pickle is already loaded")
+
+        pickle_path = pl.Path("datasets", f"{self.name}.pickle.gz")
+        if not pickle_path.exists():
+            raise ValueError(
+                f"The dataset {self.name} was expected at {pickle_path} but not found."
             )
-            positives=list(session.execute(positives_stmt))
 
-            negatives_stmt = sa.select(
-                LFunction.id,
-                RFunction.id,
-            ).where(
-                LFunction.binary_id == lid,
-                RFunction.binary_id == rid,
-            ).where(
-                LFunction.lineno != RFunction.lineno,
-                LFunction.file != RFunction.file,
-                LFunction.name != RFunction.name,
-            ).where(
-                LFunction.vector != None,
-                RFunction.vector != None,
-            ).limit(len(positives))
-            negatives=list(session.execute(negatives_stmt))
+        pickle_frame = pd.read_pickle(pickle_path)
 
-            # lfunction_ids = [id for id, _ in positives + negatives]
-            # rfunction_ids = [id for _, id in positives + negatives]
+        return FunctionDataset(
+            name=self.name,
+            frame=pd.concat(
+                [
+                    self.frame,
+                    pickle_frame,
+                ],
+                ignore_index=False,
+                axis=1,
+            ),
+        )
 
-            # lneighbors_stmt = sa.union(
-            #     sa.select(m.CallGraphEdge.src_id).where(m.CallGraphEdge.dst_id.in_(lfunction_ids)),
-            #     sa.select(m.CallGraphEdge.dst_id).where(m.CallGraphEdge.src_id.in_(lfunction_ids)),
-            # )
-            # rneighbors_stmt = sa.union(
-            #     sa.select(m.CallGraphEdge.src_id).where(m.CallGraphEdge.dst_id.in_(rfunction_ids)),
-            #     sa.select(m.CallGraphEdge.dst_id).where(m.CallGraphEdge.src_id.in_(rfunction_ids)),
-            # )
-            # lneighbors = list(session.scalars(lneighbors_stmt))
-            # rneighbors = list(session.scalars(rneighbors_stmt))
+    def dropna(self) -> "FunctionDataset":
+        return FunctionDataset(
+            name=self.name,
+            frame=self.frame.dropna(),
+        )
 
-            # all_lfunction_ids = lfunction_ids + lneighbors
-            # all_rfunction_ids = rfunction_ids + rneighbors
 
-            # similarity_stmt = sa.select(
-            #     LFunction.id,
-            #     RFunction.id,
-            #     sa.func.lshvector_compare(LFunction.vector, RFunction.vector).scalar_table_valued("sim"),
-            # ).where(
-            #     # The call-graph could contain edges to other binaries (i.e. dynamically linked libraries)
-            #     LFunction.binary_id == lid,
-            #     RFunction.binary_id == rid,
-            # ).where(
-            #     LFunction.id.in_(all_lfunction_ids),
-            #     RFunction.id.in_(all_rfunction_ids),
-            # )
-            edges = session.execute(sa.text(
-                f"""SELECT lid, rid, sim
-                FROM similarities
-                WHERE lbinary_id = {lid} AND rbinary_id = {rid}
-                """
-            ))
-            similarity_graph = nx.Graph()
-            similarity_graph.add_weighted_edges_from([(u, v, -w) for u, v,w in edges])
+def _massage_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    frame = frame.drop(
+        columns="sample_number",
+        axis=1,
+    )
+    frame["noinline"] = frame["noinline"].map({"t": True, "f": False})
+    # Replace na scores with zero scores.
+    # Ideally, this does not happen, as both vectors should not be null
+    # since they are sourced from e.functions
+    # In the real world this seems to happen. Dunno why.
+    frame["pscore"] = frame["pscore"].fillna(value=0)
+    frame["nscore"] = frame["nscore"].fillna(value=0)
 
-            return cls(
-                lbinary=session.get(m.Binary, lid),
-                rbinary=session.get(m.Binary, rid),
-                positives=positives,
-                negatives=negatives,
-                similarity_graph=similarity_graph,
-            )
+    # Add a 'label' row and have only a single target_function_id
+    value_vars = [
+        "ntarget_function_id",
+        "ptarget_function_id",
+    ]
+    frame = frame.melt(
+        id_vars=[column for column in frame.columns if column not in value_vars],
+        value_vars=value_vars,
+    ).rename(
+        {
+            "variable": "label",
+            "value": "target_function_id",
+        },
+        axis=1,
+    )
+    frame["label"] = frame["label"] == "ptarget_function_id"
+
+    # Add target function factors
+    for column in [
+        "score",
+        "size",
+        "complexity",
+        "neighborhood_size",
+    ]:
+        frame.loc[frame["label"] == 1, f"t{column}"] = frame[f"p{column}"]
+        frame.loc[frame["label"] == 0, f"t{column}"] = frame[f"n{column}"]
+        frame = frame.drop(
+            columns=[
+                f"p{column}",
+                f"n{column}",
+            ]
+        )
+
+    frame = frame.rename({"tscore": "bsim"}, axis=1)
+
+    return frame
+
+class BinaryDataset(msgspec.Struct):
+    """Pairs of biaries"""
+    name: str
+    frame: pd.DataFrame
+
+    @classmethod
+    def from_name(cls, name: str):
+        csv_path = pl.Path("datasets", f"{name}.csv")
+        if not csv_path.exists():
+            raise ValueError(f"The dataset {name} was expected at {csv_path} but not found.")
+
+        csv_frame = pd.read_csv(csv_path)
+        return cls(
+            name=name,
+            frame=csv_frame,
+        )

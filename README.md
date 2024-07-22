@@ -11,241 +11,478 @@ This repository contains a python module and accompanying jupyter notebooks.
 ## Installation
 Use `evaluatie-initdb` to initalize the postgres databse.
 
+### Configuring postgresql
+As the database gets quite big, we need to tune some postgres configuration to get reasonable good performance.
+```
+# Postgres docs recommend 25% of memory.
+shared_buffers = 16GB
+work_mem = 2GB
+max_wal_size = 2GB
+# Increase the maximum connections to allow many inserts at once.
+max_connections = 256
+# Makes our life easier when connecting from other containers
+listen_addresses = '*'
+```
+
+### Creating Views
+To allow postgres to do fast queries on foreign tables, we use materialized views with custom indices.
+All views are created in a separate schema.
+
+```sql
+-- 'v' is short for 'view'. It empathises that this is not the
+-- data created by the evaluatie python module.
+-- It contains exactly the data from bsim and evaluatie.
+CREATE SCHEMA v;
+```
+
+Copy relevant tables:
+```sql
+-- Create materialized views with coresponding indices for remote tables
+-- If this is too slow, using pg_restore --table might be faster
+
+-- Takes ~5 minutes for 58,000,000 rows
+CREATE MATERIALIZED VIEW IF NOT EXISTS v.bsim_callgraphtable AS (
+    SELECT *
+    FROM bsim.callgraphtable
+);
+CREATE INDEX IF NOT EXISTS ix_bsim_callgraphtable_src ON v.bsim_callgraphtable (src);
+CREATE INDEX IF NOT EXISTS ix_bsim_callgraphtable_dest ON v.bsim_callgraphtable (dest);
+
+-- Takes ~5 minutes for 18,000,000 rows
+SELECT lsh_reload();
+CREATE MATERIALIZED VIEW IF NOT EXISTS v.bsim_vectable AS (
+    SELECT *
+    FROM bsim.vectable
+);
+CREATE INDEX IF NOT EXISTS ix_bsim_vectable_id ON v.bsim_vectable (id);
+-- XXX indices
+
+-- Takes ~2 minutes for 20,000,000 rows
+CREATE MATERIALIZED VIEW IF NOT EXISTS v.bsim_desctable AS (
+    SELECT *
+    FROM bsim.desctable
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ix_bsim_desctable_id ON v.bsim_desctable (id);
+CREATE INDEX IF NOT EXISTS ix_bsim_desctable_name_func ON v.bsim_desctable (name_func);
+CREATE INDEX IF NOT EXISTS ix_bsim_desctable_id_signature ON v.bsim_desctable (id_signature);
+CREATE INDEX IF NOT EXISTS ix_bsim_desctable_id_exe ON v.bsim_desctable (id_exe);
+CREATE INDEX IF NOT EXISTS ix_bsim_desctable_id_addr ON v.bsim_desctable (addr);
+CREATE INDEX IF NOT EXISTS ix_bsim_desctable_id_flags ON v.bsim_desctable (flags);
+
+CREATE MATERIALIZED VIEW IF NOT EXISTS v.bsim_exetable AS (
+    SELECT *
+    FROM bsim.exetable
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ix_bsim_exetable_id ON v.bsim_exetable (id);
+CREATE INDEX IF NOT EXISTS ix_bsim_exetable_md5 ON v.bsim_exetable (md5);
+CREATE INDEX IF NOT EXISTS ix_bsim_exetable_name_exec ON v.bsim_exetable (name_exec);
+```
+
+Now, create some views that we will use afterwards:
+```sql
+-- Mapping ghidra executables to evaluatie binaries
+CREATE MATERIALIZED VIEW IF NOT EXISTS v.executable2binary AS (
+    SELECT b.id as binary_id, e.id as executable_id
+        FROM "binary" AS b
+        JOIN bsim.exetable AS e
+        ON b.md5 = e.md5
+);
+CREATE INDEX ix_executable2binary_executable_id ON v.executable2binary (executable_id);
+CREATE INDEX ix_executable2binary_binary_id ON v.executable2binary (binary_id);
+
+
+-- Exactly the same as 'binary' but with corrected image_base.
+-- We must create this early, to be able to use it later.
+CREATE MATERIALIZED VIEW v.binary AS (
+    SELECT b.id,
+        b.name,
+        b.md5,
+        b.size,
+        CASE WHEN b.image_base = 0 AND bp.bitness = 32 THEN 65536
+             WHEN b.image_base = 0 AND bp.bitness = 64 THEN 1048576
+             ELSE b.image_base
+        END AS image_base,
+        b.package_name,
+        b.package_version,
+        b.build_parameters_id
+    FROM "binary" b
+        JOIN build_parameters bp ON (
+            bp.id = b.build_parameters_id
+        )
+);
+CREATE INDEX ix_binary_id ON v.binary (id);
+CREATE INDEX ix_binary_name ON v.binary (name);
+CREATE INDEX ix_binary_md5 ON v.binary (md5);
+CREATE INDEX ix_binary_size ON v.binary (size);
+CREATE INDEX ix_binary_image_base ON v.binary (image_base);
+CREATE INDEX ix_binary_package_name ON v.binary (package_name);
+CREATE INDEX ix_binary_package_version ON v.binary (package_version);
+CREATE INDEX ix_binary_build_parameters_id ON v.binary (build_parameters_id);
+
+-- Maps ghidra description id's to functions.
+-- Takes ~5 minutes for 20,000,000 entries in bsim.desctable
+CREATE MATERIALIZED VIEW IF NOT EXISTS v.description2function AS (
+	WITH function_data AS (
+		SELECT f.id AS id, f.offset + b.image_base AS address, b.id AS binary_id, f.name
+		FROM "function" AS f JOIN v.binary AS b ON f.binary_id = b.id
+	)
+	SELECT description.id AS description_id, function_data.id AS function_id, e2b.executable_id, e2b.binary_id
+	FROM v.bsim_desctable AS description
+		JOIN v.executable2binary e2b ON (
+			description.id_exe = e2b.executable_id
+		)
+		JOIN function_data ON (
+			-- As noted in data-integrity.ipynb the address is sufficient here,
+			-- despite mismatches in names.
+			description.addr = function_data.address AND
+			e2b.binary_id = function_data.binary_id
+		)
+);
+CREATE INDEX IF NOT EXISTS ix_description2function_description_id ON v.description2function (description_id);
+CREATE INDEX IF NOT EXISTS ix_description2function_function_id ON v.description2function (function_id);
+CREATE INDEX IF NOT EXISTS ix_description2function_binary_id ON v.description2function (binary_id);
+CREATE INDEX IF NOT EXISTS ix_description2function_executable_id ON v.description2function (executable_id);
+
+-- All binaries that could be mapped completely from ghidra to evaluatie.
+-- Note that unnamed functions are left out.
+CREATE MATERIALIZED VIEW v."binary:complete" AS (
+	WITH description_wo_function AS (
+		SELECT d.id, d.name_func AS name, d.id_exe AS executable_id
+		FROM v.bsim_desctable d LEFT OUTER JOIN v.description2function d2f ON (
+			d.id = d2f.description_id
+		)
+		WHERE d2f.description_id IS NULL
+	),
+	binary_w_missing_functions AS (
+		SELECT DISTINCT e2b.binary_id AS id
+		FROM description_wo_function d JOIN v.executable2binary e2b ON (
+			d.executable_id = e2b.executable_id
+		) JOIN "binary" b ON (
+			b.id = e2b.binary_id
+		)
+		WHERE d.name NOT LIKE 'FUN_%'
+	)
+	SELECT b.*
+	FROM v."binary" b
+		LEFT OUTER JOIN binary_w_missing_functions bmissing ON (
+			b.id = bmissing.id
+		)
+	WHERE bmissing.id IS NULL
+);
+CREATE INDEX "ix_binary:complete_id" ON v."binary:complete" (id);
+CREATE INDEX "ix_binary:complete_name" ON v."binary:complete" (name);
+CREATE INDEX "ix_binary:complete_md5" ON v."binary:complete" (md5);
+CREATE INDEX "ix_binary:complete_size" ON v."binary:complete" (size);
+CREATE INDEX "ix_binary:complete_image_base" ON v."binary:complete" (image_base);
+CREATE INDEX "ix_binary:complete_package_name" ON v."binary:complete" (package_name);
+CREATE INDEX "ix_binary:complete_package_version" ON v."binary:complete" (package_version);
+CREATE INDEX "ix_binary:complete_build_parameters_id" ON v."binary:complete" (build_parameters_id);
+
+-- All edges in the call-graph.
+-- Note that this only contains functions that are found by ghidra and evaluatie,
+-- which implies that dst_binary_id = src_binary_id.
+-- Takes about 2min on my laptop.
+CREATE TABLE v.call_graph_edge AS (
+	SELECT src.function_id AS src_id, src.binary_id AS src_binary_id, dst.function_id AS dst_id, dst.binary_id AS dst_binary_id
+	FROM v.bsim_callgraphtable bcg
+		JOIN v.description2function src ON (
+			src.description_id = bcg.src
+		)
+		JOIN v.description2function dst ON (
+			dst.description_id = bcg.dest
+		)
+);
+CREATE INDEX "ix_call_graph_edge_src_id" ON v.call_graph_edge (src_id);
+CREATE INDEX "ix_call_graph_edge_dst_id" ON v.call_graph_edge (dst_id);
+CREATE INDEX "ix_call_graph_edge_src_binary_id" ON v.call_graph_edge (src_binary_id);
+CREATE INDEX "ix_call_graph_edge_dst_binary_id" ON v.call_graph_edge (dst_binary_id);
+```
+
+Now lets create some non-materialized views for queries that are quite fast and not that big.
+
+```sql
+-- All call-graph edges of binaries that are complete.
+CREATE VIEW v."call_graph_edge:complete" AS (
+	SELECT cg.*
+	FROM v.call_graph_edge cg
+		LEFT JOIN v."binary:complete" b ON (
+			-- This is correct due to src_binary_id = dst_binary_id
+			b.id = cg.src_binary_id
+		)
+)
+
+SELECT lsh_reload();
+
+-- A table of all functions that we want in our evaluation. Features are not included.
+-- See the v."factors" view .
+CREATE MATERIALIZED VIEW v."function:eval" AS (
+	SELECT f.*
+	FROM "function" f
+		-- Since we can only actually evaluate functions that have a vector associtated
+		-- we do an inner join with the description2function mapping.
+		JOIN v.description2function d2f ON (
+			f.id = d2f.function_id
+		)
+		JOIN "binary" b ON (
+		 	b.id = f.binary_id
+		)
+	-- Finnally, we filter in the same manner as Kim et al.
+	-- XXX: The section is missing here (but not that important since other papers did not do this).
+	WHERE f.file IS NOT NULL AND
+	f.file LIKE ('%' || b.package_name || '%') AND
+	f.name NOT LIKE 'sub_%' AND
+	f.lineno IS NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS ix_eval_function_id ON v."function:eval" (id);
+CREATE INDEX IF NOT EXISTS ix_eval_function_binary_id ON v."function:eval" (binary_id);
+CREATE INDEX IF NOT EXISTS ix_eval_function_file ON v."function:eval" (file);
+CREATE INDEX IF NOT EXISTS ix_eval_function_lineno ON v."function:eval" (lineno);
+CREATE INDEX IF NOT EXISTS ix_eval_function_name ON v."function:eval" (name);
+-- XXX Some indices from "functio" are missing here
+```
+
+### Creating evaluation subsets
+While it is nice to have all data in the databse, we do not use it completely.
+Thus, we create views that contain these subsets.
+```sql
+-- 'e' is show for 'evaluation'.
+-- Contains subsets of the data that we actually use.
+-- All tables are only subsets.
+CREATE SCHEMA e;
+```
+
+```sql
+-- All complete binaries using the correct compiler.
+CREATE MATERIALIZED VIEW e.binary AS (
+    SELECT b.*
+    FROM v."binary:complete" b
+        JOIN build_parameters bp ON (
+            bp.id = b.build_parameters_id
+        )
+    WHERE bp.compiler_backend = 'gcc' AND bp.compiler_version = '8.2.0'
+);
+CREATE INDEX ix_binary_id ON e.binary (id);
+CREATE INDEX ix_binary_name ON e.binary (name);
+CREATE INDEX ix_binary_md5 ON e.binary (md5);
+CREATE INDEX ix_binary_size ON e.binary (size);
+CREATE INDEX ix_binary_image_base ON e.binary (image_base);
+CREATE INDEX ix_binary_package_name ON e.binary (package_name);
+CREATE INDEX ix_binary_package_version ON e.binary (package_version);
+CREATE INDEX ix_binary_build_parameters_id ON e.binary (build_parameters_id);
+
+-- A table with all functions.
+-- We need this to calculate similarity graphs.
+CREATE TABLE e."function:all" AS (
+    SELECT f.*
+    FROM "function" f
+        JOIN e.binary b ON (
+            f.binary_id = b.id
+        )
+);
+CREATE INDEX ON e."function:all" (id);
+CREATE INDEX ON e."function:all" (binary_id);
+CREATE INDEX ON e."function:all" (name);
+CREATE INDEX ON e."function:all" (lineno);
+CREATE INDEX ON e."function:all" ("file");
+CREATE INDEX ON e."function:all" ("offset");
+CREATE INDEX ON e."function:all" ("size");
+CREATE INDEX ON e."function:all" (features_id);
+
+
+-- Make this a table, so we can import vectors in it.
+-- Functions in this list must folfill the following:
+-- * Be part of a complete binary (This implies non-null vectors for each function)
+-- * Be defined in the source code (i.e. have a non-null file)
+-- * be in the .text section
+-- * be part of the specified package
+CREATE TABLE e.function AS (
+    -- As the original paper, filter out duplicate functions per package and compile options.
+    -- Note that this also filters out multiple instanciations of the same function (again as the original paper)
+    SELECT DISTINCT ON (b.package_name, b.build_parameters_id, f.file, f.name, f.lineno)
+        f.*
+    FROM "function" f
+        -- Join binaries to filter out non-complete binaries
+        JOIN e.binary b ON (
+            f.binary_id = b.id
+        )
+    WHERE f.file IS NOT NULL
+        AND f.section = '.text'
+        AND f.path LIKE ('%' || b.package_name || '%')
+        AND f.name NOT LIKE 'FUN_%'
+    ORDER BY b.package_name, b.build_parameters_id, f.file, f.name, f.lineno, RANDOM()
+);
+-- Delete functions from binaries that only have one function in them.
+-- These functions are non-sensical for selecting negative pairs, thus we remove them.
+WITH fns AS (
+    -- This must be the same condidtion as above.
+	SELECT f.*
+	FROM "function" f
+		-- Join binaries to filter out non-complete binaries
+		JOIN e.binary b ON (
+			f.binary_id = b.id
+		)
+	WHERE f.file IS NOT NULL
+		AND f.section = '.text'
+		AND f.path LIKE ('%' || b.package_name || '%')
+		AND f.name NOT LIKE 'FUN_%'
+), bs AS (
+	SELECT fns.binary_id
+	FROM fns
+	GROUP BY fns.binary_id
+	HAVING COUNT(fns.id) = 1
+), bnames AS (
+	SELECT DISTINCT b.name
+    FROM bs
+	JOIN e.binary b ON (
+		bs.binary_id = b.id
+	)
+)
+DELETE FROM e.function f
+WHERE f.id IN (
+	SELECT g.id
+	FROM e.function g
+		JOIN e.binary b ON (
+			g.binary_id = b.id
+		)
+	WHERE b.name IN (SELECT * FROM bnames)
+);
+
+
+CREATE INDEX ON e.function (id);
+CREATE INDEX ON e.function (binary_id);
+CREATE INDEX ON e.function (name);
+CREATE INDEX ON e.function (lineno);
+CREATE INDEX ON e.function ("file");
+CREATE INDEX ON e.function ("offset");
+CREATE INDEX ON e.function ("size");
+CREATE INDEX ON e.function (features_id);
+-- XXX vector index?
+
+CREATE MATERIALIZED VIEW e.features AS (
+    SELECT ft.*
+    FROM features ft
+        JOIN e.function f ON (
+            f.features_id = ft.id
+        )
+);
+CREATE INDEX ON e.features (id);
+CREATE INDEX ON e.features (cfg_node_count);
+CREATE INDEX ON e.features (cfg_edge_count);
+
+CREATE MATERIALIZED VIEW e.call_graph_edge AS (
+    SELECT cg.*
+    FROM v.call_graph_edge cg
+        JOIN e.binary b ON (
+            cg.src_binary_id = b.id
+        )
+);
+CREATE INDEX ON e.call_graph_edge (src_id);
+CREATE INDEX ON e.call_graph_edge (dst_id);
+CREATE INDEX ON e.call_graph_edge (src_binary_id);
+CREATE INDEX ON e.call_graph_edge (dst_binary_id);
+
+-- Takes about one minute
+CREATE MATERIALIZED VIEW e."factors:raw" AS (
+    WITH callers AS (
+        SELECT f.id AS function_id, COUNT(incoming.src_id) AS "count"
+        FROM e.function f
+            LEFT JOIN e.call_graph_edge incoming ON (
+                incoming.dst_id = f.id
+            )
+        GROUP BY f.id
+    ),
+    callees AS (
+        SELECT f.id AS function_id, COUNT(outgoing.dst_id) AS "count"
+        FROM e.function f
+            LEFT JOIN e.call_graph_edge outgoing ON (
+                outgoing.src_id = f.id
+            )
+        GROUP BY f.id
+    )
+    SELECT
+        f.id AS function_id,
+        ROW_NUMBER() OVER (ORDER BY RANDOM()) AS random_id,
+        bp.optimisation,
+        bp.architecture,
+        bp.bitness,
+        bp.noinline,
+        b.package_name || '-' || b.package_version AS package,
+        ft.cfg_node_count AS size,
+        ft.cfg_edge_count - ft.cfg_node_count + 2 AS complexity,
+        callees.count + callers.count AS neighborhood_size
+    FROM e.function f
+        JOIN e.binary b ON (
+            b.id = f.binary_id
+        )
+        JOIN build_parameters bp ON (
+            bp.id = b.build_parameters_id
+        )
+        JOIN features ft ON (
+            ft.id = f.features_id
+        )
+        JOIN callers ON (
+            f.id = callers.function_id
+        )
+        JOIN callees ON (
+            f.id = callees.function_id
+        )
+);
+CREATE INDEX ON e."factors:raw" (function_id);
+CREATE INDEX ON e."factors:raw" (random_id);
+CREATE INDEX ON e."factors:raw" (optimisation);
+CREATE INDEX ON e."factors:raw" (architecture);
+CREATE INDEX ON e."factors:raw" (bitness);
+CREATE INDEX ON e."factors:raw" (noinline);
+CREATE INDEX ON e."factors:raw" (package);
+CREATE INDEX ON e."factors:raw" (size);
+CREATE INDEX ON e."factors:raw" (complexity);
+CREATE INDEX ON e."factors:raw" (neighborhood_size);
+```
+
+### Synchronizing Vectors
+As insertions turn out to be kind of slow, so we just insert what is needed.
+Note that this is a workaround and is most probably a symtom of poor database configuration.
+
 To synchronize the vectors from the studeerwerk database to the evaluatie database,
 use the following sql:
 ```sql
+-- Update vector entries for all functions that have a corresponding function in Ghidra.
+-- Imports 5,286,666 vectors into a set of 8,962,167 functions in 7 minutes.
 -- Reload weights first. If we do not do this, the weights will all be set to zero.
 -- The problem seems to be that `lsh_calc_weights` is not called.
 SELECT lsh_reload();
-
--- Update weights for all vectors.
--- OPTIONAL
--- UPDATE "function"
--- SET vector = lshvector_in(lshvector_out(vector))
--- WHERE vector IS NOT NULL;
-
-
--- Update vector entries for all functions that have a corresponding function in Ghidra.
-WITH binary_analyzed AS (
-	SELECT b.id as binary_id, e.id as executable_id
-	FROM "binary" AS b
-	JOIN bsim.exetable AS e
-	ON b.md5 = e.md5
-),
-function_data AS (
-	SELECT f.id AS id, f.offset + b.image_base AS address, b.id AS binary_id, f.name
-	FROM "function" AS f JOIN "binary" AS b ON f.binary_id = b.id
-),
-description2function AS (
-	SELECT description.id AS description_id, function_data.id AS function_id
-	FROM bsim.desctable AS description
-		JOIN binary_analyzed ON (
-			description.id_exe = binary_analyzed.executable_id
-		)
-		JOIN function_data ON (
-	        -- As noted in data-integrity.ipynb the address is sufficient here,
-	        -- despite mismatches in names.
-			description.addr = function_data.address AND
-			binary_analyzed.binary_id = function_data.binary_id
-		)
-)
-UPDATE "function" AS f
+UPDATE e."function" AS f
 	SET vector = function_id2vector.vector
 FROM (
-	SELECT description2function.function_id, vectable.vec AS vector
-	FROM bsim.vectable AS vectable JOIN bsim.desctable AS description ON (
+	SELECT d2f.function_id, vectable.vec AS vector
+	FROM v.bsim_vectable AS vectable JOIN v.bsim_desctable AS description ON (
 			description.id_signature = vectable.id
-		) JOIN description2function ON (
-			description2function.description_id = description.id
+		) JOIN v.description2function d2f ON (
+			d2f.description_id = description.id
 		)
 ) AS function_id2vector
-WHERE function_id2vector.function_id = f.id
-
-```
-
-In a similar fashion the call-graphs can be imported from studeerwerk to evalautie.
-```sql
-WITH binary_analyzed AS (
-    SELECT b.id as binary_id, e.id as executable_id
-	FROM "binary" AS b
-	JOIN bsim.exetable AS e
-	ON b.md5 = e.md5
-),
-function_data AS (
-	SELECT f.id AS id, f.offset + b.image_base AS address, b.id AS binary_id, f.name
-	FROM "function" AS f JOIN "binary" AS b ON f.binary_id = b.id
-),
-description2function AS (
-	SELECT description.id AS description_id, function_data.id AS function_id
-	FROM bsim.desctable AS description
-		JOIN binary_analyzed ON (
-			description.id_exe = binary_analyzed.executable_id
+WHERE function_id2vector.function_id = f.id;
+-- Update the second table as well.
+-- Note that while it is not guaranteed, that all of these functions will have a vector
+-- (as it is a superset of the ghidra functions) all functions in the call-graph
+-- are guaranteed to have a vector (as the call graph is sourced from ghidra)
+UPDATE e."function:all" AS f
+	SET vector = function_id2vector.vector
+FROM (
+	SELECT d2f.function_id, vectable.vec AS vector
+	FROM v.bsim_vectable AS vectable JOIN v.bsim_desctable AS description ON (
+			description.id_signature = vectable.id
+		) JOIN v.description2function d2f ON (
+			d2f.description_id = description.id
 		)
-		JOIN function_data ON (
-	        -- As noted in data-integrity.ipynb the address is sufficient here,
-	        -- despite mismatches in names.
-			description.addr = function_data.address AND
-			binary_analyzed.binary_id = function_data.binary_id
-		)
-)
-INSERT INTO call_graph_edge(src_id, dst_id)
-SELECT src.function_id AS src_id, dst.function_id AS dst_id
-FROM bsim.callgraphtable AS cg
-	JOIN description2function AS src ON  cg.src = src.description_id
-	JOIN description2function AS dst ON  cg.dest = dst.description_id
-```
+) AS function_id2vector
+WHERE function_id2vector.function_id = f.id;
 
-## Notes
-XXX Move these to docs
-
-```sql
--- Prewarm as the Ghidra code suggests
-CREATE EXTENSION IF NOT EXISTS pg_prewarm;
-SELECT pg_prewarm('function_vector_idx','read');
-SELECT pg_prewarm('function','read');
-```
-
-
-```sql
--- Similarity scores of all function pairs that are semantically equal.
-SELECT
-    (lshvector_compare(function_1.vector, function_2.vector)).sim AS sim,
-    function_1.name,
-    function_2.name AS name_1,
-    function_1.id,
-    function_2.id,
-    function_1.vector,
-    function_2.vector
-FROM
-    function AS function_1
-    JOIN "binary" AS binary_1 ON binary_1.id = function_1.binary_id
-    JOIN function AS function_2 ON function_1.binary_id != function_2.binary_id
-    JOIN "binary" AS binary_2 ON binary_2.id = function_2.binary_id
-WHERE
-    binary_1.package_name = binary_2.package_name
-    AND binary_1.package_version = binary_2.package_version
-    AND function_1.name = function_2.name
-    AND function_1.file = function_2.file
-    AND function_1.lineno = function_2.lineno
-    AND function_1.vector IS NOT NULL
-    AND function_2.vector IS NOT NULL
-    AND function_1.binary_id != function_2.binary_id;
-```
-
-```sql
--- Debugging lshvector plugin
-SELECT lshvector_compare('(1:582bcf95,1:d5574099)', '(1:582bcf95,1:d5574099)');
-
+-- Update weights if we forgot to use lsh_reload before.
 SELECT lsh_reload();
-
-SELECT f1.id, lshvector_compare(f1.vector, f1.vector)
-FROM "function" AS f1
-WHERE f1.vector::varchar = '(1:582bcf95,1:d5574099)'
-    AND f1.id = 1785;
-
-
--- As expected, this returns infinity
-SELECT lshvector_compare(f1.vector, f2.vector)
-FROM "function" AS f1, "function" AS f2
-WHERE f1.id = 1785 AND f2.id = 16737;
-
--- This reliably makes all comparisons return nan
-UPDATE "function"
-SET vector = lshvector_in(lshvector_out(vector))
-WHERE vector IS NOT NULL;
-```
-
-```sh
-# Backup the bsim database (data only)
-pg_dump \
-    --format=tar \
-    --schema=public \
-    --dbname=bsim \
-> /tmp/bsim.tar
-
-# Copy from container to host
-docker cp studeerwerk-postgres:/tmp/bsim.tar bsim.tar
-
-# Copy from host to container
-docker cp bsim.tar studeerwerk-postgres:/tmp/bsim.tar
-
-# Restore the database
-pg_restore \
-    --format=tar \
-    --schema=public \
-    --dbname=bsim \
-< /tmp/bsim.tar
-```
-
-
-```sh
-# Creating a postgres instance that can be debugged.
-
-# Install the lshvector plugin
-# Append -g and -O0 to allow debugging.
-CFLAGS="$(pg_config --cflags) -g -O0"
-doas make \
-    -C lshvector \
-    -f Makefile.lshvector \
-    PG_CONFIG=/usr/bin/pg_config \
-    CFLAGS="$CFLAGS" \
-install
-
-pg_data=~/tmp/studeerwerk-pg_data/
-mkdir $pg_data
-# No need to enable ssl here, as we restore the database anyways.
-initdb -D $pg_data \
-    --set "unix_socket_directories=$XDG_RUNTIME_DIR"
-
-pg_ctl \
-    -D $pg_data \
-    start
-
-# Now use pg_restore to add data to the database
-psql \
-    --host="$XDG_RUNTIME_DIR" \
-    --dbname=postgres
-
-# First restore the bsim database.
-CREATE DATABASE bsim;
-\c bsim;
-CREATE EXTENSION lshvector;
-\password maringuu
-
-# Do not use ghidras initdb here as it requires ssl.
-# The table definitions are already in the databse dump.
-gunzip -c tests/data/bsim.tar.gz | \
-pg_restore \
-    --format=tar \
-    --schema=public \
-    --dbname=bsim \
-    --host $XDG_RUNTIME_DIR
-
-
-# Now restore the evaluatie database.
-CREATE DATABASE evaluatie;
-\c evaluatie;
-\password maringuu
-
-./evaluatie-initdb \
-    --postgres-url postgresql://maringuu:maringuu@localhost:5432/evaluatie
-
-# Data only, as the tables were just created using evalautie-initdb
-# Disabe triggers to avoid errors with the build_parameters table.
-gunzip -c tests/data/evaluatie.tar.gz | \
-pg_restore \
-    --format=tar \
-    --schema=public \
-    --dbname=evaluatie \
-    --data-only \
-    --disable-triggers \
-    --host $XDG_RUNTIME_DIR
-```
-
-```sh
-# Some helpful gdb commands for degugging vector weights
-
-# Print vector items
-p a->items@a->numitems
+-- This makes the code load the internal weights again.
+UPDATE e."function" SET vector = (vector::text)::lshvector;
+UPDATE e."function:all" SET vector = (vector::text)::lshvector;
 ```
 
