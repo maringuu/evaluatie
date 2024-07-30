@@ -100,7 +100,7 @@ class Dataset(msgspec.Struct, frozen=True):
         binary_id2call_graph = {}
         with m.Session() as session:
             for binary_id in itertools.chain(binary_pairs["qb_id"], binary_pairs["tb_id"]):
-                binary_id2call_graph[binary_id] = _call_graph_from_binary_id(binary_id, session)
+                binary_id2call_graph[binary_id] = call_graph_from_binary_id(binary_id, session)
 
         return cls(
             spec=spec,
@@ -137,55 +137,33 @@ class Dataset(msgspec.Struct, frozen=True):
         
 
  
-def _call_graph_from_binary_id(binary_id: int, session) -> nx.DiGraph:
-    SrcFunction = sa.orm.aliased(m.Function)
-    DstFunction = sa.orm.aliased(m.Function)
 
-    edges_stmt = (
-        sa.select(
-            m.CallGraphEdge.src_id,
-            m.CallGraphEdge.dst_id,
-        )
-        .join(
-            SrcFunction,
-            m.CallGraphEdge.src,
-        )
-        .join(
-            DstFunction,
-            m.CallGraphEdge.dst,
-        )
-        .where(
-            SrcFunction.binary_id == binary_id,
-            # Note that we deliberatly ignore functions that are not in the binary.
-            # XXX Should not be relevant, should it?!
-            DstFunction.binary_id == binary_id,
-        )
+def call_graph_from_binary_id(binary_id: int, session) -> nx.DiGraph:
+    edges_stmt = sa.text(
+        f"""
+        SELECT src_id, dst_id
+        FROM v.call_graph_edge cg
+        WHERE cg.src_binary_id = {binary_id}
+        """
     )
-    nodes_stmt = sa.select(
-        m.Function,
-    ).where(
-        m.Function.binary_id == binary_id,
+    nodes_stmt = sa.text(
+        f"""
+        SELECT f.id, f.name, f.size
+        FROM "function" f
+        WHERE f.binary_id = {binary_id}
+        """
     )
 
-    edges = session.execute(edges_stmt)
-    nodes = session.scalars(nodes_stmt)
+    cg = nx.DiGraph()
 
-    graph = nx.DiGraph()
-    graph.add_edges_from(edges)
-    graph.add_nodes_from(
-        [
-            (
-                node.id,
-                {
-                    "size": node.size,
-                    "name": node.name,
-                },
-            )
-            for node in nodes
-        ]
-    )
+    for src_id, dst_id in session.execute(edges_stmt):
+        cg.add_edge(src_id, dst_id)
+    for node, name, size in session.execute(nodes_stmt):
+        cg.add_node(node, name=name, size=size)
 
-    return graph       
+    return cg 
+
+    
         
 def _similarity_graph_from_pair(qb_id: int, tb_id: int) -> nx.Graph:
     stmt = sa.text(
