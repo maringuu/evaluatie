@@ -263,35 +263,6 @@ CREATE INDEX IF NOT EXISTS ix_eval_function_name ON "eval-function" (name);
 As insertions turn out to be kind of slow, so we just insert what is needed.
 Note that this is a workaround and is most probably a symtom of poor database configuration.
 
-```sql
--- Generate a table that contains all the binary id's that are interesting
-WITH binary_ids AS (
-	-- For now, let's take all the binaries that are actually analyzed
-	SELECT DISTINCT binary_id AS id
-	FROM "eval-function"
-)
-INSERT INTO call_graph_edge(src_id, dst_id)
-SELECT src.function_id AS src_id, dst.function_id AS dst_id
-FROM "function" f
-	-- First filter the functions as they are the major bottleneck.
-	-- The result is the set of functions that are in the relevant binaries.
-	JOIN binary_ids ON (
-		f.binary_id = binary_ids.id
-	)
-	JOIN description2function dst ON (dst.function_id = f.id)
-	-- As the table is the set of all functions, all edges can be identfied
-	-- by their end.
-	JOIN bsim_callgraphtable cg ON (dst.description_id = cg.dest)
-	JOIN description2function src ON (src.description_id = cg.src)
--- Ignore already inserted edges
-ON CONFLICT DO NOTHING;
-
-
-
-```
-
-
-
 To synchronize the vectors from the studeerwerk database to the evaluatie database,
 use the following sql:
 ```sql
@@ -311,11 +282,11 @@ SELECT lsh_reload();
 UPDATE "function" AS f
 	SET vector = function_id2vector.vector
 FROM (
-	SELECT description2function.function_id, vectable.vec AS vector
-	FROM bsim_vectable AS vectable JOIN bsim_desctable AS description ON (
+	SELECT d2f.function_id, vectable.vec AS vector
+	FROM v.bsim_vectable AS vectable JOIN v.bsim_desctable AS description ON (
 			description.id_signature = vectable.id
-		) JOIN description2function ON (
-			description2function.description_id = description.id
+		) JOIN v.description2function d2f ON (
+			d2f.description_id = description.id
 		)
 ) AS function_id2vector
 WHERE function_id2vector.function_id = f.id
