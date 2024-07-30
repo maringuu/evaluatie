@@ -238,7 +238,7 @@ class Function(Base):
         nullable=True,
     )
     features_id: Mapped[int] = mapped_column(
-        sa.ForeignKey("feature.id"),
+        sa.ForeignKey("features.id"),
         index=True,
         unique=True,
     )
