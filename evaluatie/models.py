@@ -237,6 +237,14 @@ class Function(Base):
         # Nullable to account for functions that Ghidra did not find
         nullable=True,
     )
+    features_id: Mapped[int] = mapped_column(
+        sa.ForeignKey("feature.id"),
+        index=True,
+        unique=True,
+    )
+    features: Mapped["Features"] = relationship(
+        foreign_keys=features_id,
+    )
 
     __table_args__ = (
         # Ensure that function names are unique in a gesingle binary.
@@ -263,4 +271,24 @@ class Function(Base):
                 "vector": "gin_lshvector_ops",
             },
         ),
+    )
+
+class Features(Base):
+    """Manually engineered features of functions.
+    Note that the destinction of this table and the 'function' table
+    is not clear. On could say that this table contains less essential
+    features while the function table contains features that are necessary
+    to describe a function."""
+    __tablename__ = "features"
+
+    id: Mapped[int] = mapped_column(
+        primary_key=True,
+        index=True,
+    )
+
+    cfg_node_count: Mapped[int] = mapped_column(
+        index=True,
+    )
+    cfg_edge_count: Mapped[int] = mapped_column(
+        index=True,
     )
