@@ -161,22 +161,24 @@ def call_graph_from_binary_id(binary_id: int, session) -> nx.DiGraph:
     for node, name, size in session.execute(nodes_stmt):
         cg.add_node(node, name=name, size=size)
 
-    return cg 
+    return cg
 
-    
-        
-def _similarity_graph_from_pair(qb_id: int, tb_id: int) -> nx.Graph:
+
+def similarity_graph_from_pair(qb_id: int, tb_id: int) -> nx.Graph:
+    """Returns the similarity graph of all functions that can have a similarity
+    (i.e. the ones that have a non, null vector)
+    """
     stmt = sa.text(
         f"""
 WITH qf AS (
 	SELECT *
-	FROM "eval-function" f
-	WHERE f.binary_id = {qb_id}
+	FROM "function" f
+	WHERE f.binary_id = {qb_id} AND f.vector IS NOT NULL
 ),
 tf AS (
 	SELECT *
-	FROM "eval-function" f
-	WHERE f.binary_id = {tb_id}
+	FROM "function" f
+	WHERE f.binary_id = {tb_id} AND f.vector IS NOT NULL
 )
 SELECT qf.id AS qf_id, tf.id AS tf_id, (lshvector_compare(qf.vector, tf.vector)).sim AS bsim
 FROM qf, tf"""

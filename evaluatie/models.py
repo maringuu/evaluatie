@@ -213,6 +213,10 @@ class Function(Base):
         nullable=True,
         index=True,
     )
+    path: Mapped[str] = mapped_column(
+        nullable=True,
+        index=True,
+    )
     #: The line number of the function in the source file.
     lineno: Mapped[int] = mapped_column(
         # Nullable to account for missing data
@@ -224,6 +228,8 @@ class Function(Base):
     offset: Mapped[int] = mapped_column()
     #: The function's size in bytes
     size: Mapped[int] = mapped_column()
+    #: The functions section in the binary
+    section: Mapped[str] = mapped_column()
 
     binary_id: Mapped[int] = mapped_column(
         sa.ForeignKey("binary.id"),
@@ -245,6 +251,7 @@ class Function(Base):
     features: Mapped["Features"] = relationship(
         foreign_keys=features_id,
     )
+
 
     __table_args__ = (
         # Ensure that function names are unique in a gesingle binary.
@@ -292,3 +299,4 @@ class Features(Base):
     cfg_edge_count: Mapped[int] = mapped_column(
         index=True,
     )
+    # XXX This is missing the section name and hash

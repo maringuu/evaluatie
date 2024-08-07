@@ -295,3 +295,63 @@ WITH (
 
 docker cp studeerwerk-postgres:/tmp/call-graph:xo:o2xo3.csv .
 ```
+
+
+# Creating buckets
+
+```sql
+WITH percentiles AS (
+  SELECT
+    PERCENTILE_CONT(0.33) WITHIN GROUP (ORDER BY size) AS p33,
+    PERCENTILE_CONT(0.66) WITHIN GROUP (ORDER BY size) AS p66
+  FROM
+    function
+), buckets AS (
+	SELECT
+	  f.id,
+	  CASE
+	    WHEN f.size < p33 THEN 'low'
+	    WHEN f.size >= p33 AND f.size < p66 THEN 'medium'
+	    ELSE 'high'
+	  END AS bucket
+	FROM
+	  "function" f, percentiles
+)
+SELECT *
+FROM buckets
+WHERE bucket = 'high'
+```
+
+
+```sql
+-- Get the percentiles of the set of evaluation functions that we have
+SELECT
+	PERCENTILE_CONT(0.33) WITHIN GROUP (ORDER BY size) AS size_p33,
+	PERCENTILE_CONT(0.66) WITHIN GROUP (ORDER BY size) AS size_p66,
+	PERCENTILE_CONT(0.33) WITHIN GROUP (ORDER BY complexity) AS complexity_p33,
+	PERCENTILE_CONT(0.66) WITHIN GROUP (ORDER BY complexity) AS complexity_p66
+FROM v."factors:raw" fr JOIN v.description2function d2f ON (fr.function_id = d2f.function_id)
+
+-- Takes roughly 2.5minutes for 33mio functions
+WITH "factors:sample" AS (
+    SELECT
+        fr.*,
+        ROW_NUMBER() OVER (
+            PARTITION BY (
+                fr.compiler,
+                fr.optimisation,
+                fr.architecture,
+                fr.bitness,
+                fr.noinline,
+                fr.package,
+                fr.size,
+                fr.complexity
+            ) ORDER BY fr.random_id
+        ) as sample_number
+    FROM v."factors:raw" fr
+)
+SELECT *
+FROM "factors:sample"
+WHERE sample_number <= 10;
+
+```

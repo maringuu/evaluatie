@@ -16,8 +16,12 @@ As the database gets quite big, we need to tune some postgres configuration to g
 ```
 # Postgres docs recommend 25% of memory.
 shared_buffers = 16GB
-#
 work_mem = 2GB
+max_wal_size = 2GB
+# Increase the maximum connections to allow many inserts at once.
+max_connections = 256
+# Makes our life easier when connecting from other containers
+listen_addresses = '*'
 ```
 
 ### Creating Views
@@ -89,45 +93,21 @@ CREATE INDEX ix_executable2binary_binary_id ON v.executable2binary (binary_id);
 -- Exactly the same as 'binary' but with corrected image_base.
 -- We must create this early, to be able to use it later.
 CREATE MATERIALIZED VIEW v.binary AS (
-	WITH function_data AS (
-		SELECT f.id AS id, f.offset + b.image_base AS address, b.id AS binary_id, f.name
-		FROM "function" AS f JOIN "binary" AS b ON f.binary_id = b.id
-	),
-	-- All named descriptions that do not have a corresponding function
-	description_wo_function AS (
-		SELECT description.id AS description_id, e2b.executable_id, e2b.binary_id, description.addr, description.name_func AS name
-		FROM v.bsim_desctable AS description
-			JOIN v.executable2binary e2b ON (
-				description.id_exe = e2b.executable_id
-			)
-			LEFT OUTER JOIN function_data ON (
-				-- As noted in data-integrity.ipynb the address is sufficient here,
-				-- despite mismatches in names.
-				description.addr = function_data.address AND
-				e2b.binary_id = function_data.binary_id
-			)
-		WHERE function_data.address IS NULL AND description.name_func NOT LIKE 'FUN_%'
-	),
-	-- Maps binary_id's to the infered image_base
-	binary_id2image_base AS (
-		SELECT f.binary_id, (ARRAY_AGG(DISTINCT d.addr - f.offset))[1] AS image_base
-		FROM description_wo_function d
-			JOIN "binary" b ON (
-				d.binary_id = b.id
-			)
-			JOIN "function" f ON (
-				d.name = f.name AND
-				d.binary_id = f.binary_id
-			)
-		WHERE b.image_base = 0
-		GROUP BY f.binary_id
-		HAVING COUNT(DISTINCT d.addr - f.offset) = 1
-	)
-	SELECT b.id, b.name, b.md5, b.size, COALESCE(b2i.image_base, b.image_base) AS image_base, b.package_name, b.package_version, b.build_parameters_id
-	FROM "binary" b
-		LEFT OUTER JOIN binary_id2image_base b2i ON (
-			b.id = b2i.binary_id
-		)
+    SELECT b.id,
+        b.name,
+        b.md5,
+        b.size,
+        CASE WHEN b.image_base = 0 AND bp.bitness = 32 THEN 65536
+             WHEN b.image_base = 0 AND bp.bitness = 64 THEN 1048576
+             ELSE b.image_base
+        END AS image_base,
+        b.package_name,
+        b.package_version,
+        b.build_parameters_id
+    FROM "binary" b
+        JOIN build_parameters bp ON (
+            bp.id = b.build_parameters_id
+        )
 );
 CREATE INDEX ix_binary_id ON v.binary (id);
 CREATE INDEX ix_binary_name ON v.binary (name);
@@ -210,7 +190,7 @@ CREATE TABLE v.call_graph_edge AS (
 		JOIN v.description2function dst ON (
 			dst.description_id = bcg.dest
 		)
-)
+);
 CREATE INDEX "ix_call_graph_edge_src_id" ON v.call_graph_edge (src_id);
 CREATE INDEX "ix_call_graph_edge_dst_id" ON v.call_graph_edge (dst_id);
 CREATE INDEX "ix_call_graph_edge_src_binary_id" ON v.call_graph_edge (src_binary_id);
@@ -229,35 +209,189 @@ CREATE VIEW v."call_graph_edge:complete" AS (
 			b.id = cg.src_binary_id
 		)
 )
-```
 
-```sql
 SELECT lsh_reload();
 
--- All functions that are relevant in the evaluation
--- Takes 3 seconds for 50,000 vectors
-CREATE MATERIALIZED VIEW "eval-function" AS
-SELECT f.*
-FROM "function" f JOIN "binary" b ON (
-	f.binary_id = b.id
-)
-WHERE
--- See helper/filter_functions.py in tiknib
-f.file IS NOT NULL AND
-f.file LIKE ('%' || b.package_name || '%') AND
-f.name NOT LIKE 'sub_%' AND
-f.lineno IS NOT NULL AND
--- Functions without any vector are not interesting to us
-f.vector IS NOT NULL
+-- A table of all functions that we want in our evaluation. Features are not included.
+-- See the v."factors" view .
+CREATE MATERIALIZED VIEW v."function:eval" AS (
+	SELECT f.*
+	FROM "function" f
+		-- Since we can only actually evaluate functions that have a vector associtated
+		-- we do an inner join with the description2function mapping.
+		JOIN v.description2function d2f ON (
+			f.id = d2f.function_id
+		)
+		JOIN "binary" b ON (
+		 	b.id = f.binary_id
+		)
+	-- Finnally, we filter in the same manner as Kim et al.
+	-- XXX: The section is missing here (but not that important since other papers did not do this).
+	WHERE f.file IS NOT NULL AND
+	f.file LIKE ('%' || b.package_name || '%') AND
+	f.name NOT LIKE 'sub_%' AND
+	f.lineno IS NOT NULL
+);
 
-CREATE INDEX IF NOT EXISTS ix_eval_function_binary_id ON "eval-function" (binary_id);
-CREATE INDEX IF NOT EXISTS ix_eval_function_file ON "eval-function" (file);
-CREATE INDEX IF NOT EXISTS ix_eval_function_id ON "eval-function" (id);
-CREATE INDEX IF NOT EXISTS ix_eval_function_lineno ON "eval-function" (lineno);
-CREATE INDEX IF NOT EXISTS ix_eval_function_name ON "eval-function" (name);
+CREATE INDEX IF NOT EXISTS ix_eval_function_id ON v."function:eval" (id);
+CREATE INDEX IF NOT EXISTS ix_eval_function_binary_id ON v."function:eval" (binary_id);
+CREATE INDEX IF NOT EXISTS ix_eval_function_file ON v."function:eval" (file);
+CREATE INDEX IF NOT EXISTS ix_eval_function_lineno ON v."function:eval" (lineno);
+CREATE INDEX IF NOT EXISTS ix_eval_function_name ON v."function:eval" (name);
 -- XXX Some indices from "functio" are missing here
 ```
 
+### Creating evaluation subsets
+While it is nice to have all data in the databse, we do not use it completely.
+Thus, we create views that contain these subsets.
+```sql
+-- 'e' is show for 'evaluation'.
+-- Contains subsets of the data that we actually use.
+CREATE SCHEMA e;
+```
+
+```sql
+CREATE MATERIALIZED VIEW e.binary AS (
+    SELECT b.*
+    FROM v.binary b
+        JOIN build_parameters bp ON (
+            bp.id = b.build_parameters_id
+        )
+    WHERE bp.compiler_backend = 'gcc' AND bp.compiler_version = '8.2.0'
+);
+CREATE INDEX ix_binary_id ON e.binary (id);
+CREATE INDEX ix_binary_name ON e.binary (name);
+CREATE INDEX ix_binary_md5 ON e.binary (md5);
+CREATE INDEX ix_binary_size ON e.binary (size);
+CREATE INDEX ix_binary_image_base ON e.binary (image_base);
+CREATE INDEX ix_binary_package_name ON e.binary (package_name);
+CREATE INDEX ix_binary_package_version ON e.binary (package_version);
+CREATE INDEX ix_binary_build_parameters_id ON e.binary (build_parameters_id);
+
+CREATE MATERIALIZED VIEW e."binary:complete" AS (
+    SELECT b.*
+    FROM e.binary b
+        JOIN v."binary:complete" bc ON (
+            b.id = bc.id
+        )
+);
+CREATE INDEX ON e."binary:complete" (id);
+CREATE INDEX ON e."binary:complete" (name);
+CREATE INDEX ON e."binary:complete" (md5);
+CREATE INDEX ON e."binary:complete" (size);
+CREATE INDEX ON e."binary:complete" (image_base);
+CREATE INDEX ON e."binary:complete" (package_name);
+CREATE INDEX ON e."binary:complete" (package_version);
+CREATE INDEX ON e."binary:complete" (build_parameters_id);
+
+-- Make this a table, so we can import vectors in it.
+CREATE TABLE e.function AS (
+    SELECT f.*
+    FROM "function" f
+        JOIN e.binary b ON (
+            f.binary_id = b.id
+        )
+);
+CREATE INDEX ON e.function (id);
+CREATE INDEX ON e.function (binary_id);
+CREATE INDEX ON e.function (name);
+CREATE INDEX ON e.function (lineno);
+CREATE INDEX ON e.function ("file");
+CREATE INDEX ON e.function ("offset");
+CREATE INDEX ON e.function ("size");
+CREATE INDEX ON e.function (features_id);
+-- XXX vector index?
+
+CREATE MATERIALIZED VIEW e.features AS (
+    SELECT ft.*
+    FROM features ft
+        JOIN e.function f ON (
+            f.features_id = ft.id
+        )
+    WHERE f.vector IS NOT NULL
+);
+CREATE INDEX ON e.features (id);
+CREATE INDEX ON e.features (cfg_node_count);
+CREATE INDEX ON e.features (cfg_edge_count);
+
+CREATE MATERIALIZED VIEW e.call_graph_edge AS (
+    SELECT cg.*
+    FROM v.call_graph_edge cg
+        JOIN e.binary b ON (
+            cg.src_binary_id = b.id
+        )
+);
+CREATE INDEX ON e.call_graph_edge (src_id);
+CREATE INDEX ON e.call_graph_edge (dst_id);
+CREATE INDEX ON e.call_graph_edge (src_binary_id);
+CREATE INDEX ON e.call_graph_edge (dst_binary_id);
+
+-- Function ids and their factors for all functions that we want to use in our evaluation
+-- Functions in this list must folfill the following:
+-- * Be part of a complete binary (This implies non-null vectors for each function)
+-- * Be defined in the source code (i.e. have a non-null file)
+-- Takes about one minute
+CREATE MATERIALIZED VIEW e."factors:raw" AS (
+    WITH callers AS (
+        SELECT f.id AS function_id, COUNT(incoming.src_id) AS "count"
+        FROM e.function f
+            LEFT JOIN e.call_graph_edge incoming ON (
+                incoming.dst_id = f.id
+            )
+        GROUP BY f.id
+    ),
+    callees AS (
+        SELECT f.id AS function_id, COUNT(outgoing.dst_id) AS "count"
+        FROM e.function f
+            LEFT JOIN e.call_graph_edge outgoing ON (
+                outgoing.src_id = f.id
+            )
+        GROUP BY f.id
+    )
+    SELECT
+        f.id AS function_id,
+        ROW_NUMBER() OVER (ORDER BY RANDOM()) AS random_id,
+        --bp.compiler_backend || '-' || bp.compiler_version AS compiler,
+        bp.optimisation,
+        bp.architecture,
+        bp.bitness,
+        bp.noinline,
+        b.package_name || '-' || b.package_version AS package,
+        ft.cfg_node_count AS size,
+        ft.cfg_edge_count - ft.cfg_node_count + 2 AS complexity,
+        callees.count AS callees_count,
+        callers.count AS callers_count
+    -- XXX This should be "function:evaluation" instead, sholdnt it?
+    FROM e.function f
+        JOIN e."binary:complete" b ON (
+            b.id = f.binary_id
+        )
+        JOIN "build_parameters" bp ON (
+            bp.id = b.build_parameters_id
+        )
+        JOIN features ft ON (
+            ft.id = f.features_id
+        )
+        JOIN callers ON (
+            f.id = callers.function_id
+        )
+        JOIN callees ON (
+            f.id = callees.function_id
+        )
+    WHERE f.file IS NOT NULL AND f.file != ''
+);
+CREATE INDEX ON e."factors:raw" (function_id);
+CREATE INDEX ON e."factors:raw" (random_id);
+CREATE INDEX ON e."factors:raw" (optimisation);
+CREATE INDEX ON e."factors:raw" (architecture);
+CREATE INDEX ON e."factors:raw" (bitness);
+CREATE INDEX ON e."factors:raw" (noinline);
+CREATE INDEX ON e."factors:raw" (package);
+CREATE INDEX ON e."factors:raw" (size);
+CREATE INDEX ON e."factors:raw" (complexity);
+CREATE INDEX ON e."factors:raw" (callees_count);
+CREATE INDEX ON e."factors:raw" (callers_count);
+```
 
 ### Synchronizing Vectors
 As insertions turn out to be kind of slow, so we just insert what is needed.
@@ -266,20 +400,12 @@ Note that this is a workaround and is most probably a symtom of poor database co
 To synchronize the vectors from the studeerwerk database to the evaluatie database,
 use the following sql:
 ```sql
+-- Update vector entries for all functions that have a corresponding function in Ghidra.
+-- Imports 5,286,666 vectors into a set of 8,962,167 functions in 7 minutes.
 -- Reload weights first. If we do not do this, the weights will all be set to zero.
 -- The problem seems to be that `lsh_calc_weights` is not called.
 SELECT lsh_reload();
-
--- Update weights for all vectors.
--- OPTIONAL
--- UPDATE "function"
--- SET vector = lshvector_in(lshvector_out(vector))
--- WHERE vector IS NOT NULL;
-
-
--- Update vector entries for all functions that have a corresponding function in Ghidra.
--- Imports 50,000 vectors into a set of 33,000,000 functions in one minute.
-UPDATE "function" AS f
+UPDATE e."function" AS f
 	SET vector = function_id2vector.vector
 FROM (
 	SELECT d2f.function_id, vectable.vec AS vector
@@ -289,5 +415,11 @@ FROM (
 			d2f.description_id = description.id
 		)
 ) AS function_id2vector
-WHERE function_id2vector.function_id = f.id
+WHERE function_id2vector.function_id = f.id;
+
+-- Update weights if we forgot to use lsh_reload before.
+SELECT lsh_reload();
+-- This makes the code load the internal weights again.
+UPDATE e."function" SET vector = (vector::text)::lshvector;
 ```
+
