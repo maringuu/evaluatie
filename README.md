@@ -31,6 +31,7 @@ All views are created in a separate schema.
 ```sql
 -- 'v' is short for 'view'. It empathises that this is not the
 -- data created by the evaluatie python module.
+-- It contains exactly the data from bsim and evaluatie.
 CREATE SCHEMA v;
 ```
 
@@ -247,13 +248,15 @@ Thus, we create views that contain these subsets.
 ```sql
 -- 'e' is show for 'evaluation'.
 -- Contains subsets of the data that we actually use.
+-- All tables are only subsets.
 CREATE SCHEMA e;
 ```
 
 ```sql
+-- All complete binaries using the correct compiler.
 CREATE MATERIALIZED VIEW e.binary AS (
     SELECT b.*
-    FROM v.binary b
+    FROM v."binary:complete" b
         JOIN build_parameters bp ON (
             bp.id = b.build_parameters_id
         )
@@ -268,29 +271,19 @@ CREATE INDEX ix_binary_package_name ON e.binary (package_name);
 CREATE INDEX ix_binary_package_version ON e.binary (package_version);
 CREATE INDEX ix_binary_build_parameters_id ON e.binary (build_parameters_id);
 
-CREATE MATERIALIZED VIEW e."binary:complete" AS (
-    SELECT b.*
-    FROM e.binary b
-        JOIN v."binary:complete" bc ON (
-            b.id = bc.id
-        )
-);
-CREATE INDEX ON e."binary:complete" (id);
-CREATE INDEX ON e."binary:complete" (name);
-CREATE INDEX ON e."binary:complete" (md5);
-CREATE INDEX ON e."binary:complete" (size);
-CREATE INDEX ON e."binary:complete" (image_base);
-CREATE INDEX ON e."binary:complete" (package_name);
-CREATE INDEX ON e."binary:complete" (package_version);
-CREATE INDEX ON e."binary:complete" (build_parameters_id);
-
 -- Make this a table, so we can import vectors in it.
+-- Functions in this list must folfill the following:
+-- * Be part of a complete binary (This implies non-null vectors for each function)
+-- * Be defined in the source code (i.e. have a non-null file)
+-- * be in the .text section
+-- * be part of the specified package
 CREATE TABLE e.function AS (
     SELECT f.*
     FROM "function" f
         JOIN e.binary b ON (
             f.binary_id = b.id
         )
+    WHERE f.file IS NOT NULL AND f.section = '.text' AND f.path LIKE ('%' || b.package_name || '%') AND f.name NOT LIKE 'FUN_%'
 );
 CREATE INDEX ON e.function (id);
 CREATE INDEX ON e.function (binary_id);
@@ -308,7 +301,6 @@ CREATE MATERIALIZED VIEW e.features AS (
         JOIN e.function f ON (
             f.features_id = ft.id
         )
-    WHERE f.vector IS NOT NULL
 );
 CREATE INDEX ON e.features (id);
 CREATE INDEX ON e.features (cfg_node_count);
@@ -326,10 +318,6 @@ CREATE INDEX ON e.call_graph_edge (dst_id);
 CREATE INDEX ON e.call_graph_edge (src_binary_id);
 CREATE INDEX ON e.call_graph_edge (dst_binary_id);
 
--- Function ids and their factors for all functions that we want to use in our evaluation
--- Functions in this list must folfill the following:
--- * Be part of a complete binary (This implies non-null vectors for each function)
--- * Be defined in the source code (i.e. have a non-null file)
 -- Takes about one minute
 CREATE MATERIALIZED VIEW e."factors:raw" AS (
     WITH callers AS (
@@ -351,7 +339,6 @@ CREATE MATERIALIZED VIEW e."factors:raw" AS (
     SELECT
         f.id AS function_id,
         ROW_NUMBER() OVER (ORDER BY RANDOM()) AS random_id,
-        --bp.compiler_backend || '-' || bp.compiler_version AS compiler,
         bp.optimisation,
         bp.architecture,
         bp.bitness,
@@ -359,14 +346,12 @@ CREATE MATERIALIZED VIEW e."factors:raw" AS (
         b.package_name || '-' || b.package_version AS package,
         ft.cfg_node_count AS size,
         ft.cfg_edge_count - ft.cfg_node_count + 2 AS complexity,
-        callees.count AS callees_count,
-        callers.count AS callers_count
-    -- XXX This should be "function:evaluation" instead, sholdnt it?
+        callees.count + callers.count AS neighborhood_size
     FROM e.function f
-        JOIN e."binary:complete" b ON (
+        JOIN e.binary b ON (
             b.id = f.binary_id
         )
-        JOIN "build_parameters" bp ON (
+        JOIN build_parameters bp ON (
             bp.id = b.build_parameters_id
         )
         JOIN features ft ON (
@@ -378,7 +363,6 @@ CREATE MATERIALIZED VIEW e."factors:raw" AS (
         JOIN callees ON (
             f.id = callees.function_id
         )
-    WHERE f.file IS NOT NULL AND f.file != ''
 );
 CREATE INDEX ON e."factors:raw" (function_id);
 CREATE INDEX ON e."factors:raw" (random_id);
@@ -389,8 +373,7 @@ CREATE INDEX ON e."factors:raw" (noinline);
 CREATE INDEX ON e."factors:raw" (package);
 CREATE INDEX ON e."factors:raw" (size);
 CREATE INDEX ON e."factors:raw" (complexity);
-CREATE INDEX ON e."factors:raw" (callees_count);
-CREATE INDEX ON e."factors:raw" (callers_count);
+CREATE INDEX ON e."factors:raw" (neighborhood_size);
 ```
 
 ### Synchronizing Vectors
