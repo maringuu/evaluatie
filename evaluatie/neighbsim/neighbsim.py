@@ -1,6 +1,10 @@
 import msgspec
 import networkx as nx
+import sqlalchemy as sa
 from networkx.algorithms.bipartite.matching import minimum_weight_full_matching
+
+from evaluatie import models as m
+from evaluatie.utils import call_graph_from_binary_id
 
 
 class NeighBSimArgs(msgspec.Struct, frozen=True):
@@ -35,12 +39,12 @@ class NeighBSimResult(msgspec.Struct, frozen=True):
     score: float
 
 
-def _reachable_nodes(call_graph: nx.DiGraph, source: int, max_dist: int):
+def _reachable_nodes(call_graph: nx.DiGraph, source: int):
     return list(
         nx.dfs_preorder_nodes(
             call_graph,
             source=source,
-            depth_limit=max_dist,
+            depth_limit=1,
         )
     )
 
@@ -75,7 +79,11 @@ def _edge_weight_sum(graph: nx.Graph):
     return sum(data["weight"] for _, _, data in graph.edges(data=True))
 
 
-def neighbsim(query_function_id, target_function_id, args: NeighBSimArgs, max_dist=1) -> NeighBSimResult:
+def neighbsim(
+    query_function_id,
+    target_function_id,
+    args: NeighBSimArgs,
+) -> NeighBSimResult:
     qcg = args.query_call_graph
     tcg = args.target_call_graph
     sg = args.similarity_graph
@@ -83,22 +91,18 @@ def neighbsim(query_function_id, target_function_id, args: NeighBSimArgs, max_di
     qcallers = _reachable_nodes(
         qcg,
         query_function_id,
-        max_dist=max_dist,
     )
     tcallers = _reachable_nodes(
         tcg,
         target_function_id,
-        max_dist=max_dist,
     )
     qcallees = _reachable_nodes(
         qcg.reverse(copy=False),
         query_function_id,
-        max_dist=max_dist,
     )
     tcallees = _reachable_nodes(
         tcg.reverse(copy=False),
         target_function_id,
-        max_dist=max_dist,
     )
 
     # We remove from the callers only to still give some weight for recursive functions.
@@ -155,4 +159,78 @@ def neighbsim(query_function_id, target_function_id, args: NeighBSimArgs, max_di
         tcallers=tcallers,
         qcallees=qcallees,
         tcallees=tcallees,
+    )
+
+
+class NeighBSimLazyArgs(msgspec.Struct):
+    query_binary_id: int
+    query_call_graph: nx.DiGraph
+
+    target_binary_id: int
+    target_call_graph: nx.DiGraph
+
+    @classmethod
+    def from_binary_ids(cls, query_binary_id: int, target_binary_id: int, session: m.Session):
+        return cls(
+            query_binary_id=query_binary_id,
+            target_binary_id=target_binary_id,
+            query_call_graph=call_graph_from_binary_id(query_binary_id, session),
+            target_call_graph=call_graph_from_binary_id(target_binary_id, session),
+        )
+
+
+def neighbsim_lazy(
+    query_function_id,
+    target_function_id,
+    args: NeighBSimLazyArgs,
+    session: m.Session,
+) -> NeighBSimResult:
+    """A variation of our neighbsim implementation that fetches similarity lazily from the database.
+    Much faster for querying few functions from a binary pair, but much slower for more functions.
+    """
+
+    query_neighbors = list(
+        args.query_call_graph.to_undirected(
+            as_view=True,
+        ).neighbors(
+            query_function_id,
+        )
+    )
+    query_neighbors.append(query_function_id)
+
+    target_neighbors = list(
+        args.target_call_graph.to_undirected(
+            as_view=True,
+        ).neighbors(
+            target_function_id,
+        )
+    )
+    target_neighbors.append(target_function_id)
+
+    # The coalesce here is not as bad as one might think.
+    # As we only use functions from the ghidra call-graph (which ignores extern functions)
+    stmt = sa.text(f"""
+        SELECT qf.id, tf.id, COALESCE((lshvector_compare(qf.vector, tf.vector)).sim, 0)
+        FROM e."function:all" qf, e."function:all" tf
+        WHERE qf.id IN ({','.join(str(id) for id in query_neighbors)}) AND tf.id IN ({','.join(str(id) for id in target_neighbors)})
+    """)
+
+    sg = nx.Graph()
+    for qf_id, tf_id, sim in session.execute(stmt):
+        sg.add_edge(
+            qf_id,
+            tf_id,
+            weight=sim,
+        )
+
+    return neighbsim(
+        query_function_id=query_function_id,
+        target_function_id=target_function_id,
+        args=NeighBSimArgs(
+            query_binary_id=args.query_binary_id,
+            target_binary_id=args.target_binary_id,
+            query_call_graph=args.query_call_graph,
+            target_call_graph=args.target_call_graph,
+            similarity_graph=sg,
+        ),
     )

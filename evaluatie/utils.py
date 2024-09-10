@@ -6,6 +6,7 @@ from evaluatie import models as m
 
 
 def call_graph_from_binary_id(binary_id: int, session: m.Session) -> nx.DiGraph:
+    """Returns the GHIDRA call-graph. Nodes that are from evaluatie but not in ghidra are ignored."""
     edges_stmt = sa.text(
         f"""
         SELECT src_id, dst_id
@@ -17,9 +18,10 @@ def call_graph_from_binary_id(binary_id: int, session: m.Session) -> nx.DiGraph:
         f"""
         SELECT f.id, f.name, f.size
         FROM "function" f
-        -- We deliberatly ignore extern and .plt functions as their vector is NULL
-        -- and we leave this as future work.
-        WHERE f.binary_id = {binary_id} AND f.section NOT IN ('extern', '.plt')
+            JOIN v.description2function d2f ON (
+                f.id = d2f.function_id
+            )
+        WHERE f.binary_id = {binary_id}
         """
     )
 
@@ -37,14 +39,14 @@ def call_graph_from_binary_id(binary_id: int, session: m.Session) -> nx.DiGraph:
     return cg
 
 
-def similarity_graph_from_pair(qb_id: int, tb_id: int, session: m.Session, evaluation_only: bool = False) -> nx.Graph:
-    """Returns the similarity graph of all functions that can have a similarity
-    (i.e. the ones that have a non, null vector)
+def similarity_graph_from_pair(qb_id: int, tb_id: int, session: m.Session) -> nx.Graph:
+    """Returns the similarity graph of all ghidra and non-ghidra functions.
+    Non-ghidra functions will have similarity zero to all comaprisons.
     """
+
     # We need to use e."function:all" here since we need to calculate similarity between all functions
     # in the call-graph, not just the functions that we use in our evaluation.
-
-    table = "function" if evaluation_only else "function:all"
+    table = "function:all"
 
     stmt = sa.text(
         f"""

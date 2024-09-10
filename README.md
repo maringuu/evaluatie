@@ -144,6 +144,8 @@ CREATE INDEX IF NOT EXISTS ix_description2function_binary_id ON v.description2fu
 CREATE INDEX IF NOT EXISTS ix_description2function_executable_id ON v.description2function (executable_id);
 
 -- All binaries that could be mapped completely from ghidra to evaluatie.
+-- So for every function that ghidra found, there is a function in the evaluatie set.
+-- The reverse is not nececarrily true.
 -- Note that unnamed functions are left out.
 CREATE MATERIALIZED VIEW v."binary:complete" AS (
 	WITH description_wo_function AS (
@@ -291,8 +293,8 @@ CREATE INDEX ON e."function:all" (features_id);
 
 
 -- Make this a table, so we can import vectors in it.
--- Functions in this list must folfill the following:
--- * Be part of a complete binary (This implies non-null vectors for each function)
+-- Functions in this list must fulfill the following:
+-- * Be part of a complete binary (Does not imply that the vector is null, as evalautie is a superset of ghidra functions)
 -- * Be defined in the source code (i.e. have a non-null file)
 -- * be in the .text section
 -- * be part of the specified package
@@ -310,6 +312,7 @@ CREATE TABLE e.function AS (
         AND f.section = '.text'
         AND f.path LIKE ('%' || b.package_name || '%')
         AND f.name NOT LIKE 'FUN_%'
+    -- Select an isntanciation at random if there are multiple
     ORDER BY b.package_name, b.build_parameters_id, f.file, f.name, f.lineno, RANDOM()
 );
 -- Delete functions from binaries that only have one function in them.
@@ -358,6 +361,26 @@ CREATE INDEX ON e.function ("offset");
 CREATE INDEX ON e.function ("size");
 CREATE INDEX ON e.function (features_id);
 -- XXX vector index?
+
+-- MUST be executed after importing the vectors
+-- All functions of complete binaries, that ghidra found.
+-- Takes 30 sedonds on my laptop.
+CREATE MATERIALIZED VIEW e."function:ghidra" AS (
+    SELECT f.*
+    FROM e.function f
+        JOIN v.description2function d2f ON (
+            f.id = d2f.function_id
+        )
+    WHERE f.vector IS NOT NULL
+);
+CREATE INDEX ON e."function:ghidra" (id);
+CREATE INDEX ON e."function:ghidra" (binary_id);
+CREATE INDEX ON e."function:ghidra" (name);
+CREATE INDEX ON e."function:ghidra" (lineno);
+CREATE INDEX ON e."function:ghidra" ("file");
+CREATE INDEX ON e."function:ghidra" ("offset");
+CREATE INDEX ON e."function:ghidra" ("size");
+CREATE INDEX ON e."function:ghidra" (features_id);
 
 CREATE MATERIALIZED VIEW e.features AS (
     SELECT ft.*
