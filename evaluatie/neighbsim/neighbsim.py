@@ -39,16 +39,6 @@ class NeighBSimResult(msgspec.Struct, frozen=True):
     score: float
 
 
-def _reachable_nodes(call_graph: nx.DiGraph, source: int):
-    return list(
-        nx.dfs_preorder_nodes(
-            call_graph,
-            source=source,
-            depth_limit=1,
-        )
-    )
-
-
 def _matching_graph(left: list[int], right: list[int], similarity_graph: nx.Graph):
     g = nx.Graph()
     g.add_nodes_from(left)
@@ -88,24 +78,19 @@ def neighbsim(
     tcg = args.target_call_graph
     sg = args.similarity_graph
 
-    qcallers = _reachable_nodes(
-        qcg,
-        query_function_id,
+    qcallers = list(
+        qcg.successors(query_function_id),
     )
-    tcallers = _reachable_nodes(
-        tcg,
-        target_function_id,
+    tcallers = list(
+        tcg.successors(target_function_id),
     )
-    qcallees = _reachable_nodes(
-        qcg.reverse(copy=False),
-        query_function_id,
+    qcallees = list(
+        qcg.reverse(copy=False).successors(query_function_id),
     )
-    tcallees = _reachable_nodes(
-        tcg.reverse(copy=False),
-        target_function_id,
+    tcallees = list(
+        tcg.reverse(copy=False).successors(target_function_id),
     )
 
-    # We remove from the callers only to still give some weight for recursive functions.
     try:
         qcallers.remove(query_function_id)
     except ValueError:
@@ -116,15 +101,16 @@ def neighbsim(
     except ValueError:
         pass
 
-    # try:
-    #     qcallees.remove(query_function_id)
-    # except ValueError:
-    #     pass
+    try:
+        qcallees.remove(query_function_id)
+    except ValueError:
+        pass
 
-    # try:
-    #     tcallees.remove(target_function_id)
-    # except ValueError:
-    #     pass
+    try:
+        tcallees.remove(target_function_id)
+    except ValueError:
+        pass
+
     caller_matching = _matching_graph(qcallers, tcallers, sg)
     callee_matching = _matching_graph(qcallees, tcallees, sg)
 
