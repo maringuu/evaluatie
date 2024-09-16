@@ -79,16 +79,16 @@ def neighbsim(
     sg = args.similarity_graph
 
     qcallers = list(
-        qcg.successors(query_function_id),
+        qcg.predecessors(query_function_id),
     )
     tcallers = list(
-        tcg.successors(target_function_id),
+        tcg.predecessors(target_function_id),
     )
     qcallees = list(
-        qcg.reverse(copy=False).successors(query_function_id),
+        qcg.successors(query_function_id),
     )
     tcallees = list(
-        tcg.reverse(copy=False).successors(target_function_id),
+        tcg.successors(target_function_id),
     )
 
     try:
