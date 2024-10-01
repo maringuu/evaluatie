@@ -166,6 +166,9 @@ CREATE MATERIALIZED VIEW v."binary:complete" AS (
 	)
 	SELECT b.*
 	FROM v."binary" b
+    	JOIN v.executable2binary e2b ON (
+        	b.id = e2b.binary_id
+    	)
 		LEFT OUTER JOIN binary_w_missing_functions bmissing ON (
 			b.id = bmissing.id
 		)
@@ -507,5 +510,6 @@ SELECT lsh_reload();
 -- This makes the code load the internal weights again.
 UPDATE e."function" SET vector = (vector::text)::lshvector;
 UPDATE e."function:all" SET vector = (vector::text)::lshvector;
+UPDATE e."function:ghidra" SET vector = (vector::text)::lshvector;
 ```
 
