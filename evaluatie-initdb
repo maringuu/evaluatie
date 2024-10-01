@@ -74,9 +74,10 @@ def cli(postgres_url_str: str | None, bsim_postgres_url_str: str | None):
                 "IMPORT FOREIGN SCHEMA public FROM SERVER bsim INTO bsim;\n"
                 # Create views for all tables needed by lsh_reload
                 # Views are sufficient, as Ghidra selects from these by name in lsh.c
-                "CREATE OR REPLACE VIEW weighttable AS SELECT * FROM bsim.weighttable;\n"
-                "CREATE OR REPLACE VIEW idflookup AS SELECT * FROM bsim.idflookup;\n"
                 "CREATE OR REPLACE VIEW keyvaluetable AS SELECT * FROM bsim.keyvaluetable;\n"
+                # Disabeled to disable feature weighting
+                #"CREATE OR REPLACE VIEW weighttable AS SELECT * FROM bsim.weighttable;\n"
+                #"CREATE OR REPLACE VIEW idflookup AS SELECT * FROM bsim.idflookup;\n"
             )
             # fmt: on
         )

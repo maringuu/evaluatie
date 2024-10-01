@@ -62,6 +62,7 @@ tf AS (
 )
 SELECT qf.id AS qf_id, tf.id AS tf_id, COALESCE((lshvector_compare(qf.vector, tf.vector)).sim, 0) AS bsim
 FROM qf, tf
+WHERE qf.vector IS NOT NULL AND tf.vector IS NOT NULL
 """
     )
 

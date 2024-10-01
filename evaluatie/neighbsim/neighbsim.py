@@ -1,3 +1,5 @@
+import logging
+
 import msgspec
 import networkx as nx
 import sqlalchemy as sa
@@ -54,7 +56,13 @@ def _matching_graph(left: list[int], right: list[int], similarity_graph: nx.Grap
         edge = (u, v)
         mg.edges[edge]["weight"] = -data["weight"]
 
-    assert len(mg.edges) == len(left) * len(right), "Similarity graph is missing edges"
+    if len(mg.edges) != len(left) * len(right):
+        logging.error(
+            "Similarity graph is missing edges.\n"
+            f"Edges: {mg.edges}\n"
+            f"Left: {left}\n"
+            f"Right: {right}\n"
+        )
 
     m = minimum_weight_full_matching(mg, top_nodes=left)
 

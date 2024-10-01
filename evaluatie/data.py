@@ -68,6 +68,30 @@ class FunctionDataset(msgspec.Struct):
             frame=self.frame.dropna(),
         )
 
+    def drop_metadata(self, keep: list | None = None) -> "FunctionDataset":
+        columns = [
+            "query_binary_id",
+            "target_binary_id",
+            "query_function_id",
+            "target_function_id",
+            "label",
+            "bsim",
+        ]
+
+        if "neighbsim" in self.frame.columns:
+            columns.append("neighbsim")
+
+        if keep is not None:
+            for column in keep:
+                if keep in columns:
+                    continue
+                columns.append(column)
+
+        return FunctionDataset(
+            name=self.name,
+            frame=self.frame[columns].copy(),
+        )
+
 
 def _massage_frame(frame: pd.DataFrame) -> pd.DataFrame:
     frame = frame.drop(
@@ -119,8 +143,10 @@ def _massage_frame(frame: pd.DataFrame) -> pd.DataFrame:
 
     return frame
 
+
 class BinaryDataset(msgspec.Struct):
     """Pairs of biaries"""
+
     name: str
     frame: pd.DataFrame
 

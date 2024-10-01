@@ -28,6 +28,8 @@ graphviz = "^0.20.3"
 scikit-learn = "^1.5.0"
 # Important for the pickle files since consumeer depends on numpy 2
 numpy = ">=2.0.0"
+mlstatkit = "^0.1.7"
+statsmodels = "^0.14.4"
 
 
 [tool.poetry.group.dev.dependencies]
