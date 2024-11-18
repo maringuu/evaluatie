@@ -147,7 +147,6 @@ def firmup_args_from_binary_ids(query_binary_id: int, target_binary_id: int) -> 
             qb_id=query_binary_id,
             tb_id=target_binary_id,
             session=session,
-            require_non_null=True,
         )
 
     return FirmUPArgs(
