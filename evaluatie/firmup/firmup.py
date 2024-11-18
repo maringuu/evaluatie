@@ -12,10 +12,18 @@ class FirmUPArgs(msgspec.Struct):
     query_binary_id: int
     target_binary_id: int
 
+class FirmUPResult(msgspec.Struct):
+    matching: nx.Graph
+    steps: int
 
-def firmup(query_function_id: int, args: FirmUPArgs) -> nx.Graph|None:
+class StepLimitReachedError(Exception):
+    pass
+
+
+def firmup(query_function_id: int, args: FirmUPArgs) -> FirmUPResult|None:
     """Returns None if the firmup algorithm failed.
-    If it succeds, it returns the matching"""
+    If it succeds, it returns the matching.
+    Raises StepLimitReachedError if the maximum number of steps would be exceeded"""
     # This implements the algorithm exactly as described in the paper
 
     sg = args.similarity_graph
@@ -30,7 +38,7 @@ def firmup(query_function_id: int, args: FirmUPArgs) -> nx.Graph|None:
 
     n_steps = 0
     # We limit the number of steps for performance reasons
-    max_steps = 32
+    max_steps = 128
     # Part of GameDidntEnd()
     failed = False
     # "A match was found for qv"
@@ -112,10 +120,16 @@ def firmup(query_function_id: int, args: FirmUPArgs) -> nx.Graph|None:
         # Thus I added an additional check above.
         failed = not modified
 
+    if n_steps >= max_steps:
+        raise StepLimitReachedError
+
     if query_function_id not in matching:
         return None
 
-    return matching
+    return FirmUPResult(
+        steps=n_steps,
+        matching=matching,
+    )
 
 
 def _get_best_match(function_id: int, similarity_graph: nx.Graph):
