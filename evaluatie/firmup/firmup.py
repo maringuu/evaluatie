@@ -20,7 +20,7 @@ class StepLimitReachedError(Exception):
     pass
 
 
-def firmup(query_function_id: int, args: FirmUPArgs) -> FirmUPResult|None:
+def firmup(query_function_id: int, args: FirmUPArgs, max_steps: int|None = None) -> FirmUPResult|None:
     """Returns None if the firmup algorithm failed.
     If it succeds, it returns the matching.
     Raises StepLimitReachedError if the maximum number of steps would be exceeded"""
@@ -37,8 +37,9 @@ def firmup(query_function_id: int, args: FirmUPArgs) -> FirmUPResult|None:
     unmatched_stack = [(args.query_binary_id, query_function_id)]
 
     n_steps = 0
-    # We limit the number of steps for performance reasons
-    max_steps = 128
+    if max_steps is None:
+        max_steps = float("inf")
+        
     # Part of GameDidntEnd()
     failed = False
     # "A match was found for qv"
